@@ -1,6 +1,6 @@
 fmt:
-	fd -e py | xargs isort --profile black
-	fd -e py | xargs black
+	fd -e py --exclude object-detection/ | xargs isort --profile black
+	fd -e py --exclude object-detection/ | xargs black
 
 lint:
-	fd -e py | xargs flake8
+	fd -e py --exclude object-detection/ | xargs flake8
