@@ -255,6 +255,9 @@ def cocofy(image_dir: str, label_file: str, output_dir: str | pathlib.Path) -> N
             category = Category(
                 category_id_lookup.id_of(category_name), category_name, row["label_l2"]
             )
+            # All splits need all categories
+            for split, _ in dataset.splits():
+                dataset[split].add_category(category)
 
             annotation = Annotation(
                 i, image_id, category.id, BoundingBox.from_dict(row)
@@ -265,7 +268,6 @@ def cocofy(image_dir: str, label_file: str, output_dir: str | pathlib.Path) -> N
             # other images are loading.
             image = image_futures[image_id].result(timeout=None)
 
-            dataset[split].add_category(category)
             dataset[split].add_image(image)
             dataset[split].add_annotation(annotation)
 
@@ -278,7 +280,7 @@ def cocofy(image_dir: str, label_file: str, output_dir: str | pathlib.Path) -> N
 
         # Write annotation files
         for split, annotations in dataset.splits():
-            with open(split_dir / "annotations.json", "w") as fd:
+            with open(output_dir / split / "annotations.json", "w") as fd:
                 json.dump(annotations.asdict(), fd)
 
         # Make sure all images have been properly copied.
