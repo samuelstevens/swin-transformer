@@ -106,7 +106,6 @@ class Annotation(JsonObj):
             "id": self.id,
             "image_id": self.image_id,
             "category_id": self.category_id,
-            "segmentation": [],
             "bbox": [self.bbox.x, self.bbox.y, self.bbox.width, self.bbox.height],
             "area": self.bbox.area,
             "iscrowd": 0,
