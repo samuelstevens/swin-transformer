@@ -140,3 +140,6 @@ wandb/
 
 # host-specific values
 scripts/env.fish
+
+# submodules (never using those again)
+object-detection
