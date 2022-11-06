@@ -116,8 +116,8 @@ def handle_linear_head(config, model, state_dict, logger):
         assert hasattr(model.head, "bias"), "Should have a single random linear head"
         # Increment finegrained level until the key doesn't exist.
         # Then it is the last level in the hierarchical model
-        max_level = 0
-        while _hierarchical_bias_k(max_level) in state_dict:
+        max_level = -1
+        while _hierarchical_bias_k(max_level + 1) in state_dict:
             max_level += 1
 
         finegrained_num_classes_pretrained = state_dict[
