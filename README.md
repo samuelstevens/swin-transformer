@@ -32,16 +32,14 @@ pip install matplotlib yacs timm einops black isort flake8 flake8-bugbear termco
 
 2. Install Apex
 
+Apex is not needed if you do not want to use fp16.
+
 ```sh
 git clone https://github.com/NVIDIA/apex.git
 cd apex
 pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
 ```
 
-```sh
-cd kernels/window_process
-python setup.py install
-```
 
 3. Download Data
 

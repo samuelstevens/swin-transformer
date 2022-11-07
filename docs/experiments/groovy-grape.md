@@ -6,6 +6,7 @@ It also does 90 epochs at 192.
 ```yaml
 configs:
 - configs/hierarchical-vision-project/groovy-grape-192.yaml
+- object-detection/configs/hierarchical-vision-project/groovy_grape_fishnet.py
 codename: groovy-grape
 ```
 
@@ -17,3 +18,5 @@ Now it is stored at /local/scratch/stevens.994/hierarchical-vision/groovy-grape-
 It was originally haunted-broomstick on wandb, but is now groovy-grape-256.
 
 I messed it up by switching std/mean, so I am restarting this run on 8xV100.
+
+After pre-training finished at 192x192, I am fine-tuning it for object detection on 8xV100 (imageomics-aws-east-1-0) where it is due to finish 12 epochs at 8PM on Monday (Nov 7th).
