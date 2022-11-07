@@ -106,7 +106,7 @@ class WandbWriter:
         wandb.init(**kwargs)
 
         # Validation metrics
-        wandb.define_metric("val/loss", step_metric="epoch", summary="max")
+        wandb.define_metric("val/loss", step_metric="epoch", summary="min")
         wandb.define_metric("val/acc1", step_metric="epoch", summary="max")
         wandb.define_metric("val/acc5", step_metric="epoch", summary="max")
 
