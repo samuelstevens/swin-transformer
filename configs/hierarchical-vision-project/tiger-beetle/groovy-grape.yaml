@@ -1,0 +1,29 @@
+DATA:
+  DATASET: tiger-beetle
+  IMG_SIZE: 192
+  NUM_WORKERS: 32
+MODEL:
+  TYPE: swinv2
+  NAME: swinv2_base_window12
+  PRETRAINED: /local/scratch/stevens.994/hierarchical-vision/pretrained-checkpoints/groovy-grape-192-epoch89.pth
+  DROP_PATH_RATE: 0.2
+  SWINV2:
+    EMBED_DIM: 128
+    DEPTHS: [ 2, 2, 18, 2 ]
+    NUM_HEADS: [ 4, 8, 16, 32 ]
+    WINDOW_SIZE: 12
+    PRETRAINED_WINDOW_SIZES: [ 12, 12, 12, 6 ]
+TRAIN:
+  GLOBAL_BATCH_SIZE: 16
+
+  EPOCHS: 30
+  WARMUP_EPOCHS: 5
+  WEIGHT_DECAY: 0.1
+
+  BASE_LR: 1.25e-4
+  WARMUP_LR: 1.25e-7
+  MIN_LR: 1.25e-6
+
+EXPERIMENT:
+  NAME: groovy-grape-tiger
+  WANDB_ID: 36fhmuxo

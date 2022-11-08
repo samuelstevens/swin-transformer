@@ -41,13 +41,18 @@ def load_statistics(directory, expected_channels=3, atol=1e-5):
     divisor = 0
     try:
         threadpool = concurrent.futures.ThreadPoolExecutor()
-        with os.scandir(directory) as it:
-            entries = [entry for entry in (it) if extension_matches(entry.name)]
+        filepaths = []
+        for (dirpath, dirnames, filenames) in os.walk(directory):
+            for filename in filenames:
+                if not extension_matches(filename):
+                    continue
 
-        random.shuffle(entries)
+                filepaths.append(os.path.join(dirpath, filename))
+
+        random.shuffle(filepaths)
         futures = [
-            threadpool.submit(stats_of, entry.path, expected_channels)
-            for entry in tqdm(entries)
+            threadpool.submit(stats_of, path, expected_channels)
+            for path in tqdm(filepaths)
         ]
 
         print(f"Submitted {len(futures)} calls to stats_of().")
@@ -61,7 +66,7 @@ def load_statistics(directory, expected_channels=3, atol=1e-5):
             total_squared += sums_squared
             divisor += pixels
 
-            if i % 1000 == 0:
+            if (i + 1) % 1000 == 0:
                 mean = total / divisor
                 var = (total_squared / divisor) - (mean * mean)
                 std = np.sqrt(var)

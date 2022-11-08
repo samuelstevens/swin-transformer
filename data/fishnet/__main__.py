@@ -10,8 +10,8 @@ def normalize_cli(args):
     print(
         f"""
 img_norm_cfg = dict(
-    mean={(mean * 255).tolist()},
-    std={(std * 255).tolist()},
+    mean={(mean * args.scale).tolist()},
+    std={(std * args.scale).tolist()},
     to_rgb=True,
 )"""
     )
@@ -45,6 +45,9 @@ def main():
         "normalize", help="Measure mean and std of dataset."
     )
     normalize_parser.add_argument("directory", help="Data folder")
+    normalize_parser.add_argument(
+        "--scale", help="What to multiply values by.", default=1
+    )
     normalize_parser.set_defaults(func=normalize_cli)
 
     args = parser.parse_args()

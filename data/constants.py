@@ -22,5 +22,9 @@ data_mean_std = {
         torch.tensor([0.23768986761569977, 0.22925858199596405, 0.2476460039615631]),
         torch.tensor([0.4632672071456909, 0.480050653219223, 0.37618669867515564]),
     ),
+    "/local/scratch/stevens.994/data/tiger-beetle/processed": (
+        torch.tensor([0.503083218844332, 0.5775137087338068, 0.6259513527945232]),
+        torch.tensor([0.2518764425218349, 0.23707872616648928, 0.2373721641220995]),
+    ),
     "imagenet": (IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
 }

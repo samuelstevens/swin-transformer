@@ -163,8 +163,18 @@ def build_dataset(is_train, config):
         else:
             dataset = datasets.ImageFolder(root, transform=transform)
             nb_classes = 10_000
+    elif config.DATA.DATASET == "tiger-beetle":
+        if config.DATA.ZIP_MODE:
+            raise NotImplementedError("We do not support zipped tiger-beetle")
+        if config.HIERARCHICAL:
+            raise NotImplementedError("We do not support hierarchical tiger-beetle")
+
+        prefix = "train" if is_train else "val"
+        root = os.path.join(config.DATA.DATA_PATH, prefix)
+        dataset = datasets.ImageFolder(root, transform=transform)
+        nb_classes = 9
     else:
-        raise NotImplementedError("We only support ImageNet now.")
+        raise NotImplementedError(f"We do not support dataset '{config.DATA.DATASET}'.")
 
     return dataset, nb_classes
 
