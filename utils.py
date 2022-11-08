@@ -60,7 +60,7 @@ def _hierarchical_bias_k(i):
     return f"head.heads.{i}.bias"
 
 
-def handle_linear_head(config, model, state_dict, logger):
+def handle_linear_head(config, model, state_dict, logger) -> set[str]:
     """
     Check classifier, if not match, then re-init classifier to zero
     Ways it could not match:
@@ -81,6 +81,7 @@ def handle_linear_head(config, model, state_dict, logger):
 
     pretrained_hierarchical = _hierarchical_bias_k(0) in state_dict
     current_hierarchical = config.HIERARCHICAL
+    okay_missing_keys = set()
 
     if not pretrained_hierarchical and not current_hierarchical:
         # TESTED because Microsoft wrote this code.
@@ -108,12 +109,16 @@ def handle_linear_head(config, model, state_dict, logger):
                 logger.warning(
                     "Error in loading classifier head, re-init classifier head to 0"
                 )
+
+        breakpoint()
+
+        okay_missing_keys = {"head.weight", "head.bias"}
     elif pretrained_hierarchical and not current_hierarchical:
-        # UNTESTED
         assert (
             "head.bias" not in state_dict
         ), "Should not have a single pre-trained linear head"
         assert hasattr(model.head, "bias"), "Should have a single random linear head"
+
         # Increment finegrained level until the key doesn't exist.
         # Then it is the last level in the hierarchical model
         max_level = -1
@@ -138,6 +143,7 @@ def handle_linear_head(config, model, state_dict, logger):
             logger.warning(
                 "Error in loading classifier head, using default initialization."
             )
+        okay_missing_keys = {"head.weight", "head.bias"}
     elif not pretrained_hierarchical and current_hierarchical:
         # UNTESTED
         assert "head.bias" in state_dict, "Should have a single pre-trained linear head"
@@ -200,6 +206,8 @@ def handle_linear_head(config, model, state_dict, logger):
                 del state_dict[_hierarchical_bias_k(i)]
         else:
             logger.info("Using pre-trained hierarchical head.")
+
+    return okay_missing_keys
 
 
 def load_pretrained(config, model, logger):
@@ -290,12 +298,13 @@ def load_pretrained(config, model, logger):
                 )
                 state_dict[k] = absolute_pos_embed_pretrained_resized
 
-    handle_linear_head(config, model, state_dict, logger)
+    okay_missing_head_keys = handle_linear_head(config, model, state_dict, logger)
 
     msg = model.load_state_dict(state_dict, strict=False)
     for key in msg.missing_keys:
         assert (
-            "relative_coords_table" in key
+            key in okay_missing_head_keys
+            or "relative_coords_table" in key
             or "relative_position_index" in key
             or "attn_mask" in key
         ), f"Should only reinitialize relative positional information, not '{key}'"

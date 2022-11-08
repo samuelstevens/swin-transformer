@@ -251,6 +251,21 @@ _C.EXPERIMENT.NAME = "default-dragonfruit"
 _C.EXPERIMENT.WANDB_ID = ""
 
 # -----------------------------------------------------------------------------
+# Wandb Sweet Settings
+# -----------------------------------------------------------------------------
+_C.SWEEP = CN()
+
+_C.SWEEP.ENABLED = False
+_C.SWEEP.METHOD = "random"
+_C.SWEEP.NAME = "learning-rate"
+_C.SWEEP.METRIC = {"goal": "maximize", "name": "val_acc"}
+_C.SWEEP.PARAMETERS = {
+    "batch_size": {"values": [8, 16, 32, 64, 128]},
+    "epochs": {"values": [5, 10, 15, 30, 60, 120]},
+    "lr": {"max": 0.1, "min": 1e-9},
+}
+
+# -----------------------------------------------------------------------------
 # Misc
 # -----------------------------------------------------------------------------
 
@@ -355,36 +370,6 @@ def update_config(config, args):
     if "LOCAL_RANK" in os.environ:
         # set local rank for distributed training
         config.LOCAL_RANK = int(os.environ["LOCAL_RANK"])
-
-    # Use this to calculate accumulation steps
-    if "LOCAL_WORLD_SIZE" in os.environ:
-
-        def divide_cleanly(a, b):
-            assert a % b == 0, f"{a} / {b} has remainder {a % b}"
-            return a // b
-
-        n_procs = int(os.environ["LOCAL_WORLD_SIZE"])
-        desired_device_batch_size = divide_cleanly(
-            config.TRAIN.GLOBAL_BATCH_SIZE, n_procs
-        )
-        actual_device_batch_size = config.TRAIN.DEVICE_BATCH_SIZE
-
-        if actual_device_batch_size > desired_device_batch_size:
-            print(
-                f"Decreasing device batch size from {actual_device_batch_size} to {desired_device_batch_size} so your global bath size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {desired_device_batch_size * n_procs}!"
-            )
-            config.TRAIN.ACCUMULATION_STEPS = 1
-            config.TRAIN.DEVICE_BATCH_SIZE = desired_device_batch_size
-        elif desired_device_batch_size == actual_device_batch_size:
-            config.TRAIN.ACCUMULATION_STEPS = 1
-        else:
-            assert desired_device_batch_size > actual_device_batch_size
-            config.TRAIN.ACCUMULATION_STEPS = divide_cleanly(
-                desired_device_batch_size, actual_device_batch_size
-            )
-            print(
-                f"Using {config.TRAIN.ACCUMULATION_STEPS} accumulation steps so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {actual_device_batch_size * n_procs}!"
-            )
 
     # output folder
     config.OUTPUT = os.path.join(config.OUTPUT, config.EXPERIMENT.NAME)

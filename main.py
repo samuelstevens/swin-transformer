@@ -18,6 +18,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 from timm.loss import LabelSmoothingCrossEntropy
 from timm.utils import AverageMeter
+import wandb
 
 from config import get_config
 from data import build_loader
@@ -135,6 +136,12 @@ def parse_option():
 
 
 def main(config):
+    # First load all config options from wandb if we are doing a sweep
+    if config.SWEEP.ENABLED:
+        config.defrost()
+        config.TRAIN.BASE_LR = wandb.config.train_base_lr
+        config.TRAIN.BASE_LR = wandb.config.train_base_lr
+
     (
         dataset_train,
         dataset_val,
@@ -496,6 +503,36 @@ if __name__ == "__main__":
     random.seed(seed)
     cudnn.benchmark = True
 
+    # Use this to calculate accumulation steps
+    if "WORLD_SIZE" in os.environ:
+
+        def divide_cleanly(a, b):
+            assert a % b == 0, f"{a} / {b} has remainder {a % b}"
+            return a // b
+
+        n_procs = int(os.environ["WORLD_SIZE"])
+        desired_device_batch_size = divide_cleanly(
+            config.TRAIN.GLOBAL_BATCH_SIZE, n_procs
+        )
+        actual_device_batch_size = config.TRAIN.DEVICE_BATCH_SIZE
+
+        if actual_device_batch_size > desired_device_batch_size:
+            print(
+                f"Decreasing device batch size from {actual_device_batch_size} to {desired_device_batch_size} so your global bath size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {desired_device_batch_size * n_procs}!"
+            )
+            config.TRAIN.ACCUMULATION_STEPS = 1
+            config.TRAIN.DEVICE_BATCH_SIZE = desired_device_batch_size
+        elif desired_device_batch_size == actual_device_batch_size:
+            config.TRAIN.ACCUMULATION_STEPS = 1
+        else:
+            assert desired_device_batch_size > actual_device_batch_size
+            config.TRAIN.ACCUMULATION_STEPS = divide_cleanly(
+                desired_device_batch_size, actual_device_batch_size
+            )
+            print(
+                f"Using {config.TRAIN.ACCUMULATION_STEPS} accumulation steps so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {actual_device_batch_size * n_procs}!"
+            )
+
     # linear scale the learning rate according to total batch size, may not be optimal
     linear_scaled_lr = (
         config.TRAIN.BASE_LR
@@ -534,8 +571,6 @@ if __name__ == "__main__":
         dist_rank=dist.get_rank(),
         name=f"{config.EXPERIMENT.NAME}",
     )
-    wandb_writer = WandbWriter(rank=dist.get_rank())
-    wandb_writer.init(config)
 
     if dist.get_rank() == 0:
         path = os.path.join(config.OUTPUT, "config.yaml")
@@ -547,4 +582,14 @@ if __name__ == "__main__":
     logger.info(config.dump())
     logger.info(json.dumps(vars(args)))
 
-    main(config)
+    if not args.sweep:
+        wandb_writer = WandbWriter(rank=dist.get_rank())
+        wandb_writer.init(config)
+        main(config)
+    else:
+        sweep_id = wandb.sweep(sweep=config.SWEEP, project="hierarchical-vision")
+
+        wandb_writer = WandbWriter(rank=dist.get_rank())
+        wandb_writer.init(config)
+
+        wandb.agent(sweep_id, function=main, count=4)
