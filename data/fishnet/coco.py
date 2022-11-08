@@ -1,12 +1,14 @@
 import abc
+import collections
 import concurrent.futures
 import csv
 import json
 import logging
 import os
 import pathlib
+import random
 import shutil
-from typing import Any, Generic, Literal, TypedDict, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 import cv2  # type: ignore
 import preface
@@ -15,7 +17,15 @@ from tqdm.auto import tqdm  # type: ignore
 T = TypeVar("T")
 SplitName = Literal["train", "val", "test"]
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def finish_all(futures: list[concurrent.futures.Future[T]]) -> list[T]:
+    return [
+        future.result()
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures))
+    ]
 
 
 class JsonObj(abc.ABC):
@@ -33,6 +43,9 @@ class IdLookup(Generic[T]):
             self._lookup[obj] = len(self._lookup)
 
         return self._lookup[obj]
+
+    def contains(self, obj: T) -> bool:
+        return obj in self._lookup
 
 
 class BoundingBox:
@@ -57,19 +70,55 @@ class BoundingBox:
         return cls(x, y, width, height)
 
 
-class Image(JsonObj):
-    def __init__(self, path: str, id: int):
+class Annotation(JsonObj):
+    def __init__(
+        self, id: int, image_id: int, category_id: int, bbox: BoundingBox
+    ) -> None:
         self.id = id
-        self.path = path
-        self.file_name = os.path.basename(path)
+        self.image_id = image_id
+        self.category_id = category_id
+        self.bbox = bbox
 
-        height, width, channels = cv2.imread(path).shape
+    def asdict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "image_id": self.image_id,
+            "category_id": self.category_id,
+            "bbox": [self.bbox.x, self.bbox.y, self.bbox.width, self.bbox.height],
+            "area": self.bbox.area,
+            "iscrowd": 0,
+        }
+
+
+class Image(JsonObj):
+    def __init__(self, path: str | pathlib.Path, id: int, split: SplitName):
+        self.id = id
+        self.path = str(path)
+        self.split = split
+
+        self.file_name = os.path.basename(path)
+        self.height = None
+        self.width = None
+        self.annotations = []
+
+    def init(self) -> "Image":
+        """Call this method when you want to actually open
+        the path and load the height and width (expensive).
+        """
+        height, width, channels = cv2.imread(self.path).shape
         assert channels == 3
 
         self.height = height
         self.width = width
 
+    def add_annotation(self, ann: Annotation):
+        assert self.id == ann.image_id, f"{self.id} != {ann.image_id}"
+        self.annotations.append(ann)
+
     def asdict(self) -> dict[str, object]:
+        if self.height is None or self.width is None:
+            raise RuntimeError("You must call .init() before .asdict().")
+
         return {
             "id": self.id,
             "width": self.width,
@@ -92,26 +141,6 @@ class Category(JsonObj):
         }
 
 
-class Annotation(JsonObj):
-    def __init__(
-        self, id: int, image_id: int, category_id: int, bbox: BoundingBox
-    ) -> None:
-        self.id = id
-        self.image_id = image_id
-        self.category_id = category_id
-        self.bbox = bbox
-
-    def asdict(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "image_id": self.image_id,
-            "category_id": self.category_id,
-            "bbox": [self.bbox.x, self.bbox.y, self.bbox.width, self.bbox.height],
-            "area": self.bbox.area,
-            "iscrowd": 0,
-        }
-
-
 class Split(JsonObj):
     def __init__(self) -> None:
         self.images: list[Image] = []
@@ -119,9 +148,6 @@ class Split(JsonObj):
 
         self.categories: list[Category] = []
         self._category_ids: set[int] = set()
-
-        self.annotations: list[Annotation] = []
-        self._annotation_ids: set[int] = set()
 
     def add_image(self, image: Image) -> None:
         if image.id in self._image_ids:
@@ -137,25 +163,23 @@ class Split(JsonObj):
         self._category_ids.add(category.id)
         self.categories.append(category)
 
-    def add_annotation(self, annotation: Annotation) -> None:
-        if annotation.id in self._annotation_ids:
-            logger.warn("Tried to add duplicate annotation. [id: %s]", annotation.id)
-            return
-
-        assert (
-            annotation.image_id in self._image_ids
-        ), f"Image {annotation.image_id} does not exist!"
-        assert (
-            annotation.category_id in self._category_ids
-        ), f"Category {annotation.category_id} does not exist!"
-
-        self._annotation_ids.add(annotation.id)
-        self.annotations.append(annotation)
-
     def asdict(self) -> dict[str, object]:
+        annotations = preface.flattened(image.annotations for image in self.images)
+
+        for ann in annotations:
+            if ann.category_id not in self._category_ids:
+                raise RuntimeError(
+                    f"Annotation {ann.id}'s category id {ann.category_id} is unseen."
+                )
+
+            if ann.image_id not in self._image_ids:
+                raise RuntimeError(
+                    f"Annotation {ann.id}'s image id {ann.image_id} is unseen."
+                )
+
         return {
             "images": [image.asdict() for image in self.images],
-            "annotations": [annotation.asdict() for annotation in self.annotations],
+            "annotations": [ann.asdict() for ann in annotations],
             "categories": [category.asdict() for category in self.categories],
         }
 
@@ -203,53 +227,61 @@ def parse_split(row: dict[str, object]) -> Literal["train", "val", "test"]:
         raise RuntimeError(train, val, test)
 
 
-def cocofy(image_dir: str, label_file: str, output_dir: str | pathlib.Path) -> None:
+def calc_limit(limit: int, size: float) -> int:
+    # Do this int(size) == size check because size will always be a float
+    if int(size) == size:
+        return size
+
+    if size > 1.0:
+        logger.warn(
+            "size is floating point and > 1, which means more than 100% of the data. [size: %s]",
+            size,
+        )
+
+    return int(size * limit)
+
+
+def cocofy(
+    image_dir: str | pathlib.Path,
+    label_file: str | pathlib.Path,
+    output_dir: str | pathlib.Path,
+    size: float | None,
+) -> None:
     """
     Arguments should all be absolute paths
     """
+    image_dir = pathlib.Path(image_dir)
     output_dir = pathlib.Path(output_dir)
 
     # Lookup from filename to id
     image_id_lookup = IdLookup[str]()
+
+    # Lookup from split to image id to Image object
+    images = collections.defaultdict(dict)
 
     # Lookup from category name to id
     category_id_lookup = IdLookup[str]()
 
     dataset = Dataset()
 
-    for split, annotations in dataset.splits():
+    for split, _ in dataset.splits():
         split_dir = output_dir / split
         split_dir.mkdir(exist_ok=True, parents=True)
 
-    try:
-        threadpool = concurrent.futures.ThreadPoolExecutor()
-        fd = open(label_file)
+    with open(label_file) as fd:
+        # Load all annotations, images and categories
+        for i, row in enumerate(tqdm(csv.DictReader(fd), desc="Reading labels")):
+            split = parse_split(row)
 
-        image_futures = {}
+            # Set up image
+            image_uuid = row["img_id"]
+            image_id = image_id_lookup.id_of(image_uuid)
+            if image_id not in images[split]:
+                image_path = image_dir / f"{image_uuid}.jpg"
+                images[split][image_id] = Image(image_path, image_id, split)
+            image = images[split][image_id]
 
-        for entry in tqdm(os.scandir(image_dir), desc="Scanning directory"):
-            uuid, ext = os.path.splitext(entry.name)
-            if ext != ".jpg":
-                logger.warn(
-                    f"File  has a bad extension. Skipping. [file: '%s', ext: '%s']",
-                    entry.name,
-                    ext,
-                )
-                continue
-
-            image_id = image_id_lookup.id_of(uuid)
-
-            image_futures[image_id] = threadpool.submit(Image, entry.path, image_id)
-
-        csvreader = csv.DictReader(fd)
-
-        copy_futures = []
-        logger.info(
-            "This will block with no progress for ~1 minute as we wait for images."
-        )
-        for i, row in enumerate(tqdm(csvreader, desc="Reading labels")):
-            image_id = image_id_lookup.id_of(row["img_id"], insert=False)
-
+            # Set up category
             category_name = row["label_l1"]
             category = Category(
                 category_id_lookup.id_of(category_name), category_name, row["label_l2"]
@@ -258,37 +290,48 @@ def cocofy(image_dir: str, label_file: str, output_dir: str | pathlib.Path) -> N
             for split, _ in dataset.splits():
                 dataset[split].add_category(category)
 
+            # Set up annotation
             annotation = Annotation(
-                i, image_id, category.id, BoundingBox.from_dict(row)
+                i, image.id, category.id, BoundingBox.from_dict(row)
             )
+            image.add_annotation(annotation)
 
-            split = parse_split(row)
-            # This line can block for quite a while. But while it is blocking,
-            # other images are loading.
-            image = image_futures[image_id].result(timeout=None)
+    # Calculate limits
+    train_limit = calc_limit(len(images["train"]), size)
+    train_image_ids = list(images["train"])
+    random.seed(42)
+    random.shuffle(train_image_ids)
+    train_image_ids = train_image_ids[:train_limit]
+    for image_id in set(images["train"]) - set(train_image_ids):
+        del images["train"][image_id]
 
-            dataset[split].add_image(image)
-            dataset[split].add_annotation(annotation)
+    # Add training images to splits
+    for split, annotations in dataset.splits():
+        for image in images[split].values():
+            annotations.add_image(image)
 
-            # Copy images using existing threadpool (non-blocking call)
-            copy_futures.append(
-                threadpool.submit(
-                    shutil.copy2, image.path, output_dir / split / image.file_name
+    try:
+        threadpool = concurrent.futures.ThreadPoolExecutor()
+
+        copy_futures = []
+        init_futures = []
+
+        for split, annotations in dataset.splits():
+            for image in annotations.images:
+                copy_futures.append(
+                    threadpool.submit(
+                        shutil.copy2, image.path, output_dir / split / image.file_name
+                    )
                 )
-            )
+                init_futures.append(threadpool.submit(image.init))
+
+        finish_all(init_futures)
 
         # Write annotation files
         for split, annotations in dataset.splits():
             with open(output_dir / split / "annotations.json", "w") as fd:
                 json.dump(annotations.asdict(), fd)
 
-        # Make sure all images have been properly copied.
-        for future in tqdm(
-            concurrent.futures.as_completed(copy_futures),
-            total=len(copy_futures),
-            desc="Copying images",
-        ):
-            future.result()
+        finish_all(copy_futures)
     finally:
-        fd.close()
         threadpool.shutdown(wait=False, cancel_futures=True)

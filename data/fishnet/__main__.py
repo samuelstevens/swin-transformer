@@ -10,15 +10,15 @@ def normalize_cli(args):
     print(
         f"""
 img_norm_cfg = dict(
-    mean={(mean * 255).tolist()}, 
-    std={(std * 255).tolist()}, 
+    mean={(mean * 255).tolist()},
+    std={(std * 255).tolist()},
     to_rgb=True,
 )"""
     )
 
 
 def cocofy_cli(args):
-    coco.cocofy(args.images, args.labels, args.output)
+    coco.cocofy(args.images, args.labels, args.output, args.size)
 
 
 def main():
@@ -32,6 +32,12 @@ def main():
     cocofy_parser.add_argument("images", help="Images folder")
     cocofy_parser.add_argument("labels", help="Labels file")
     cocofy_parser.add_argument("output", help="Output folder")
+    cocofy_parser.add_argument(
+        "--size",
+        help="How much of the training data to include. Integers imply a COUNT while floats imply a FRACTION.",
+        default=None,
+        type=float,
+    )
     cocofy_parser.set_defaults(func=cocofy_cli)
 
     # Normalize
