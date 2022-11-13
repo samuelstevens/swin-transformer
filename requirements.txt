@@ -1,0 +1,14 @@
+black
+einops
+flake8
+flake8-bugbear
+isort
+jupyterlab
+preface
+opencv-python
+matplotlib
+mypy
+timm
+termcolor
+yacs
+wandb

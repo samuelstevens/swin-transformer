@@ -16,32 +16,28 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
-from timm.loss import LabelSmoothingCrossEntropy
 from timm.utils import AverageMeter
 
-from config import get_config
-from data import build_loader
-from hierarchical import (
-    FineGrainedCrossEntropyLoss,
-    HierarchicalCrossEntropyLoss,
-    accuracy,
-)
-from logger import WandbWriter, create_logger
-from lr_scheduler import build_scheduler
-from models import build_model
-from optimizer import build_optimizer
-from utils import (
-    NativeScalerWithGradNormCount,
+from .config import get_config
+from .data import build_loader
+from .hierarchical import FineGrainedCrossEntropyLoss, accuracy
+from .logger import WandbWriter, create_logger
+from .loss_criterion import build_loss_criterion
+from .lr_scheduler import build_scheduler
+from .models import build_model
+from .optimizer import build_optimizer
+from .utils import (
     auto_resume_helper,
     batch_size_of,
-    load_checkpoint,
+    load_model_checkpoint,
     load_pretrained,
+    load_training_checkpoint,
     reduce_tensor,
     save_checkpoint,
 )
 
 
-def parse_option():
+def make_parser():
     parser = argparse.ArgumentParser(
         "Swin Transformer training and evaluation script", add_help=False
     )
@@ -127,6 +123,10 @@ def parse_option():
         help="overwrite optimizer if provided, can be adamw/sgd/fused_adam/fused_lamb.",
     )
 
+    return parser
+
+
+def parse_options(parser):
     args, unparsed = parser.parse_known_args()
 
     config = get_config(args)
@@ -138,12 +138,12 @@ def main(config):
     (
         dataset_train,
         dataset_val,
-        data_loader_train,
-        data_loader_val,
+        dataloader_train,
+        dataloader_val,
         mixup_fn,
     ) = build_loader(config)
 
-    logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
+    logger.info(f"Creating model: {config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
     logger.info(str(model))
 
@@ -167,30 +167,6 @@ def main(config):
     )
     loss_scaler = NativeScalerWithGradNormCount()
 
-    if config.TRAIN.ACCUMULATION_STEPS > 1:
-        lr_scheduler = build_scheduler(
-            config, optimizer, len(data_loader_train) // config.TRAIN.ACCUMULATION_STEPS
-        )
-    else:
-        lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train))
-
-    if config.AUG.MIXUP == 0 and config.MODEL.LABEL_SMOOTHING > 0.0:
-        if config.HIERARCHICAL:
-            raise NotImplementedError(
-                "We don't support hierarhical loss with label smoothing and no mixup."
-            )
-        criterion = LabelSmoothingCrossEntropy(smoothing=config.MODEL.LABEL_SMOOTHING)
-    else:
-        # If we have mixup, smoothing is handled with mixup label transform
-        if config.HIERARCHICAL:
-            criterion = HierarchicalCrossEntropyLoss(
-                coeffs=config.TRAIN.HIERARCHICAL_COEFFS
-            ).to(torch.cuda.current_device())
-        else:
-            criterion = torch.nn.CrossEntropyLoss()
-
-    logger.info("Loss function: %s", criterion)
-
     max_accuracy = 0.0
 
     if config.TRAIN.AUTO_RESUME:
@@ -208,42 +184,57 @@ def main(config):
             logger.info(f"no checkpoint found in {config.OUTPUT}, ignoring auto resume")
 
     if config.MODEL.RESUME:
-        max_accuracy = load_checkpoint(
-            config, model_without_ddp, optimizer, lr_scheduler, loss_scaler, logger
-        )
-        acc1, acc5, loss = validate(
-            config, data_loader_val, model, config.TRAIN.START_EPOCH - 1
-        )
-        logger.info(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%"
-        )
-        logger.info("Previously reported best accuracy: %.2f", max_accuracy)
-        if config.EVAL_MODE:
-            return
+        # Resuming training on this dataset.
+        checkpoint = load_model_checkpoint(config, model_without_ddp, logger)
 
-    if config.MODEL.PRETRAINED and (not config.MODEL.RESUME):
+        max_accuracy = checkpoint.max_accuracy
+        config.defrost()
+        config.TRAIN.START_EPOCH = checkpoint.start_epoch
+        config.freeze()
+    elif config.MODEL.PRETRAINED:
+        # Loading from a pretrained checkpoint that might not be used on this dataset.
         load_pretrained(config, model_without_ddp, logger)
-        acc1, acc5, loss = validate(
-            config, data_loader_val, model, config.TRAIN.START_EPOCH - 1
-        )
-        logger.info(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%"
-        )
+
+    acc1, acc5, loss = validate(
+        config, dataloader_val, model, config.TRAIN.START_EPOCH - 1
+    )
+    logger.info(
+        "[acc1: %.1f, acc5: %.1f, loss: %.3f, test images: %d, prev acc1: %.1f]",
+        acc1,
+        acc5,
+        loss,
+        len(dataset_val),
+        max_accuracy,
+    )
+
+    if config.EVAL_MODE:
+        return
 
     if config.THROUGHPUT_MODE:
-        throughput(data_loader_val, model, logger)
+        throughput(dataloader_val, model, logger)
         return
+
+    lr_scheduler = build_scheduler(
+        config, optimizer, len(dataloader_train) // config.TRAIN.ACCUMULATION_STEPS
+    )
+
+    criterion = build_loss_criterion(config)
+    logger.info("Loss function: %s", criterion)
+
+    if config.MODEL.RESUME:
+        # Resuming training on this dataset.
+        load_training_checkpoint(config, optimizer, lr_scheduler, loss_scaler, logger)
 
     logger.info("Start training")
     start_time = time.time()
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
-        data_loader_train.sampler.set_epoch(epoch)
+        dataloader_train.sampler.set_epoch(epoch)
 
         train_one_epoch(
             config,
             model,
             criterion,
-            data_loader_train,
+            dataloader_train,
             optimizer,
             epoch,
             mixup_fn,
@@ -264,7 +255,7 @@ def main(config):
                 logger,
             )
 
-        acc1, acc5, loss = validate(config, data_loader_val, model, epoch)
+        acc1, acc5, loss = validate(config, dataloader_val, model, epoch)
         logger.info(
             f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%"
         )
@@ -280,7 +271,7 @@ def train_one_epoch(
     config,
     model,
     criterion,
-    data_loader,
+    dataloader,
     optimizer,
     epoch,
     mixup_fn,
@@ -290,7 +281,7 @@ def train_one_epoch(
     model.train()
     optimizer.zero_grad()
 
-    num_steps = len(data_loader)
+    num_steps = len(dataloader)
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
     norm_meter = AverageMeter()
@@ -298,7 +289,7 @@ def train_one_epoch(
 
     start = time.time()
     end = time.time()
-    for idx, (samples, targets) in enumerate(data_loader):
+    for idx, (samples, targets) in enumerate(dataloader):
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
 
@@ -388,7 +379,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def validate(config, data_loader, model, epoch):
+def validate(config, dataloader, model, epoch):
     if config.HIERARCHICAL:
         criterion = FineGrainedCrossEntropyLoss()
     else:
@@ -401,7 +392,7 @@ def validate(config, data_loader, model, epoch):
     acc5_meter = AverageMeter()
 
     end = time.time()
-    for idx, (images, target) in enumerate(data_loader):
+    for idx, (images, target) in enumerate(dataloader):
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
 
@@ -428,7 +419,7 @@ def validate(config, data_loader, model, epoch):
         if idx % config.PRINT_FREQ == 0:
             memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
             logger.info(
-                f"Test: [{idx}/{len(data_loader)}]\t"
+                f"Test: [{idx}/{len(dataloader)}]\t"
                 f"Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
                 f"Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t"
                 f"Acc@1 {acc1_meter.val:.3f} ({acc1_meter.avg:.3f})\t"
@@ -449,10 +440,10 @@ def validate(config, data_loader, model, epoch):
 
 
 @torch.no_grad()
-def throughput(data_loader, model, logger):
+def throughput(dataloader, model, logger):
     model.eval()
 
-    for idx, (images, _) in enumerate(data_loader):
+    for idx, (images, _) in enumerate(dataloader):
         images = images.cuda(non_blocking=True)
         batch_size = images.shape[0]
         for _ in range(50):
@@ -471,7 +462,8 @@ def throughput(data_loader, model, logger):
 
 
 if __name__ == "__main__":
-    args, config = parse_option()
+    parser = make_parser()
+    args, config = parse_options(parser)
 
     if config.AMP_OPT_LEVEL:
         print("[warning] Apex amp has been deprecated, please use pytorch amp instead!")

@@ -44,33 +44,9 @@ except ImportError:
 
 def build_loader(config):
     config.defrost()
-    dataset_train, config.MODEL.NUM_CLASSES = build_dataset(
-        is_train=True, config=config
-    )
+    dataset_val, config.MODEL.NUM_CLASSES = build_dataset(is_train=False, config=config)
     config.freeze()
-    print(
-        f"local rank {config.LOCAL_RANK} / global rank {dist.get_rank()} successfully build train dataset"
-    )
-    dataset_val, _ = build_dataset(is_train=False, config=config)
-    print(
-        f"local rank {config.LOCAL_RANK} / global rank {dist.get_rank()} successfully build val dataset"
-    )
-
-    # Check if we are overfitting some subset of the training data for debugging
-    if config.TRAIN.OVERFIT_BATCHES > 0:
-        n_examples = config.TRAIN.OVERFIT_BATCHES * config.TRAIN.DEVICE_BATCH_SIZE
-        indices = random.sample(range(len(dataset_train)), n_examples)
-        dataset_train = Subset(dataset_train, indices)
-
-    num_tasks = dist.get_world_size()
-    global_rank = dist.get_rank()
-    if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == "part":
-        indices = np.arange(dist.get_rank(), len(dataset_train), dist.get_world_size())
-        sampler_train = SubsetRandomSampler(indices)
-    else:
-        sampler_train = torch.utils.data.DistributedSampler(
-            dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
+    print(f"Rank {config.LOCAL_RANK}/{dist.get_rank()} built val dataset.")
 
     if config.TEST.SEQUENTIAL:
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
@@ -79,16 +55,7 @@ def build_loader(config):
             dataset_val, shuffle=config.TEST.SHUFFLE
         )
 
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train,
-        sampler=sampler_train,
-        batch_size=config.TRAIN.DEVICE_BATCH_SIZE,
-        num_workers=config.DATA.NUM_WORKERS,
-        pin_memory=config.DATA.PIN_MEMORY,
-        drop_last=True,
-    )
-
-    data_loader_val = torch.utils.data.DataLoader(
+    dataloader_val = torch.utils.data.DataLoader(
         dataset_val,
         sampler=sampler_val,
         batch_size=config.TRAIN.DEVICE_BATCH_SIZE,
@@ -98,30 +65,67 @@ def build_loader(config):
         drop_last=False,
     )
 
-    # setup mixup / cutmix
-    mixup_fn = None
-    mixup_active = (
-        config.AUG.MIXUP > 0
-        or config.AUG.CUTMIX > 0.0
-        or config.AUG.CUTMIX_MINMAX is not None
-    )
-    if mixup_active:
-        mixup_args = dict(
-            mixup_alpha=config.AUG.MIXUP,
-            cutmix_alpha=config.AUG.CUTMIX,
-            cutmix_minmax=config.AUG.CUTMIX_MINMAX,
-            prob=config.AUG.MIXUP_PROB,
-            switch_prob=config.AUG.MIXUP_SWITCH_PROB,
-            mode=config.AUG.MIXUP_MODE,
-            label_smoothing=config.MODEL.LABEL_SMOOTHING,
-            num_classes=config.MODEL.NUM_CLASSES,
-        )
-        if config.HIERARCHICAL:
-            mixup_fn = HierarchicalMixup(**mixup_args)
-        else:
-            mixup_fn = Mixup(**mixup_args)
+    # Make these guys into lists so they have a __len__
+    dataset_train = []
+    dataloader_train = []
 
-    return dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn
+    mixup_fn = None
+
+    if not config.EVAL_MODE:
+        dataset_train, _ = build_dataset(is_train=True, config=config)
+        print(f"Rank {config.LOCAL_RANK}/{dist.get_rank()} built train dataset.")
+
+        # Check if we are overfitting some subset of the training data for debugging
+        if config.TRAIN.OVERFIT_BATCHES > 0:
+            n_examples = config.TRAIN.OVERFIT_BATCHES * config.TRAIN.DEVICE_BATCH_SIZE
+            indices = random.sample(range(len(dataset_train)), n_examples)
+            dataset_train = Subset(dataset_train, indices)
+
+        num_tasks = dist.get_world_size()
+        global_rank = dist.get_rank()
+        if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == "part":
+            indices = np.arange(
+                dist.get_rank(), len(dataset_train), dist.get_world_size()
+            )
+            sampler_train = SubsetRandomSampler(indices)
+        else:
+            sampler_train = torch.utils.data.DistributedSampler(
+                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
+
+        dataloader_train = torch.utils.data.DataLoader(
+            dataset_train,
+            sampler=sampler_train,
+            batch_size=config.TRAIN.DEVICE_BATCH_SIZE,
+            num_workers=config.DATA.NUM_WORKERS,
+            pin_memory=config.DATA.PIN_MEMORY,
+            drop_last=True,
+        )
+
+        # setup mixup / cutmix
+        mixup_fn = None
+        mixup_active = (
+            config.AUG.MIXUP > 0
+            or config.AUG.CUTMIX > 0.0
+            or config.AUG.CUTMIX_MINMAX is not None
+        )
+        if mixup_active:
+            mixup_args = dict(
+                mixup_alpha=config.AUG.MIXUP,
+                cutmix_alpha=config.AUG.CUTMIX,
+                cutmix_minmax=config.AUG.CUTMIX_MINMAX,
+                prob=config.AUG.MIXUP_PROB,
+                switch_prob=config.AUG.MIXUP_SWITCH_PROB,
+                mode=config.AUG.MIXUP_MODE,
+                label_smoothing=config.MODEL.LABEL_SMOOTHING,
+                num_classes=config.MODEL.NUM_CLASSES,
+            )
+            if config.HIERARCHICAL:
+                mixup_fn = HierarchicalMixup(**mixup_args)
+            else:
+                mixup_fn = Mixup(**mixup_args)
+
+    return dataset_train, dataset_val, dataloader_train, dataloader_val, mixup_fn
 
 
 def build_dataset(is_train, config):
@@ -151,9 +155,11 @@ def build_dataset(is_train, config):
         dataset = IN22KDATASET(config.DATA.DATA_PATH, ann_file, transform)
         nb_classes = 21841
 
-    elif config.DATA.DATASET == "inat21":
+    elif config.DATA.DATASET in ("inat21", "inat19"):
         if config.DATA.ZIP_MODE:
-            raise NotImplementedError("We do not support zipped inat21")
+            raise NotImplementedError(
+                f"We do not support zipped {config.DATA.DATASET}."
+            )
 
         prefix = "train" if is_train else "val"
         root = os.path.join(config.DATA.DATA_PATH, prefix)

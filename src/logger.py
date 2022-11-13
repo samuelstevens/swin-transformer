@@ -12,7 +12,6 @@ import sys
 
 import torch
 from termcolor import colored
-from torch.utils.tensorboard import SummaryWriter
 
 import wandb
 
@@ -50,37 +49,6 @@ def create_logger(output_dir, dist_rank=0, name=""):
     logger.addHandler(file_handler)
 
     return logger
-
-
-class TensorboardWriter:
-    writer = None
-
-    def __init__(self, output_dir, dist_rank):
-        self.output_dir = output_dir
-
-        if dist_rank == 0:
-            self.writer = SummaryWriter(log_dir=self.output_dir)
-
-    def add_hparams(self, hparams, metrics):
-        pass
-
-    def log(self, items, step):
-        if self.writer is None:
-            return
-
-        # Copied from huggingface/accelerate/src/accelerate/tracking.py
-        for k, v in items.items():
-            if isinstance(v, (int, float)):
-                self.writer.add_scalar(k, v, global_step=step)
-            elif isinstance(v, torch.Tensor):
-                assert v.numel() == 1
-                self.writer.add_scalar(k, v.item(), global_step=step)
-            elif isinstance(v, str):
-                self.writer.add_text(k, v, global_step=step)
-            elif isinstance(v, dict):
-                self.writer.add_scalars(k, v, global_step=step)
-            else:
-                print(f"Can't log {v} because it is {type(v)}!")
 
 
 class WandbWriter:

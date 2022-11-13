@@ -5,6 +5,7 @@
 # Written by Ze Liu
 # --------------------------------------------------------
 
+import dataclasses
 import os
 
 import torch
@@ -12,10 +13,14 @@ import torch.distributed as dist
 from torch._six import inf
 
 
-def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger):
-    logger.info(
-        f"==============> Resuming form {config.MODEL.RESUME}...................."
-    )
+@dataclasses.dataclass(frozen=True)
+class ModelCheckpoint:
+    max_accuracy: float
+    start_epoch: int
+
+
+def load_model_checkpoint(config, model, logger) -> ModelCheckpoint:
+    logger.info("Loading training checkpoint. [path: %s]", config.MODEL.RESUME)
     if config.MODEL.RESUME.startswith("https"):
         checkpoint = torch.hub.load_state_dict_from_url(
             config.MODEL.RESUME, map_location="cpu", check_hash=True
@@ -29,27 +34,32 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger)
     if "max_accuracy" in checkpoint:
         max_accuracy = checkpoint["max_accuracy"]
 
-    config.defrost()
-    config.TRAIN.START_EPOCH = checkpoint["epoch"] + 1
-    config.freeze()
+    return ModelCheckpoint(max_accuracy, checkpoint["epoch"] + 1)
 
-    if (
-        not config.EVAL_MODE
-        and "optimizer" in checkpoint
-        and "lr_scheduler" in checkpoint
-        and "epoch" in checkpoint
-    ):
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-        if "scaler" in checkpoint:
-            loss_scaler.load_state_dict(checkpoint["scaler"])
-        logger.info(
-            f"=> loaded successfully '{config.MODEL.RESUME}' (epoch {checkpoint['epoch']})"
+
+def load_training_checkpoint(config, optimizer, lr_scheduler, loss_scaler, logger):
+    # Copy/pasted from above function to maintain a flatter structure.
+    logger.info("Loading training checkpoint. [path: %s]", config.MODEL.RESUME)
+    if config.MODEL.RESUME.startswith("https"):
+        checkpoint = torch.hub.load_state_dict_from_url(
+            config.MODEL.RESUME, map_location="cpu", check_hash=True
         )
+    else:
+        checkpoint = torch.load(config.MODEL.RESUME, map_location="cpu")
+
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+    if "scaler" in checkpoint:
+        loss_scaler.load_state_dict(checkpoint["scaler"])
+
+    logger.info(
+        "Loaded training checkpoint. [path: %s, epoch: %d]",
+        config.MODEL.RESUME,
+        checkpoint["epoch"],
+    )
 
     del checkpoint
     torch.cuda.empty_cache()
-    return max_accuracy
 
 
 def _hierarchical_weight_k(i):

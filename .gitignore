@@ -137,6 +137,7 @@ apex/
 # Logging
 runs/
 wandb/
+artifacts/
 
 # host-specific values
 scripts/env.fish
