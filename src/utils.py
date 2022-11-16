@@ -17,35 +17,33 @@ from torch._six import inf
 class ModelCheckpoint:
     max_accuracy: float
     start_epoch: int
+    state_dict_msg: object
 
 
-def load_model_checkpoint(config, model, logger) -> ModelCheckpoint:
-    logger.info("Loading training checkpoint. [path: %s]", config.MODEL.RESUME)
-    if config.MODEL.RESUME.startswith("https"):
-        checkpoint = torch.hub.load_state_dict_from_url(
-            config.MODEL.RESUME, map_location="cpu", check_hash=True
-        )
-    else:
-        checkpoint = torch.load(config.MODEL.RESUME, map_location="cpu")
+def load_model_checkpoint(checkpoint_file, model, logger) -> ModelCheckpoint:
+    logger.info("Loading model checkpoint. [path: %s]", checkpoint_file)
+    checkpoint = torch.load(checkpoint_file, map_location="cpu")
+
     msg = model.load_state_dict(checkpoint["model"], strict=False)
-    logger.info(msg)
 
     max_accuracy = 0.0
     if "max_accuracy" in checkpoint:
         max_accuracy = checkpoint["max_accuracy"]
 
-    return ModelCheckpoint(max_accuracy, checkpoint["epoch"] + 1)
+    logger.info(
+        "Loaded model checkpoint. [path: %s, epoch: %d]",
+        checkpoint_file,
+        checkpoint["epoch"],
+    )
+
+    return ModelCheckpoint(max_accuracy, checkpoint["epoch"] + 1, msg)
 
 
-def load_training_checkpoint(config, optimizer, lr_scheduler, loss_scaler, logger):
-    # Copy/pasted from above function to maintain a flatter structure.
-    logger.info("Loading training checkpoint. [path: %s]", config.MODEL.RESUME)
-    if config.MODEL.RESUME.startswith("https"):
-        checkpoint = torch.hub.load_state_dict_from_url(
-            config.MODEL.RESUME, map_location="cpu", check_hash=True
-        )
-    else:
-        checkpoint = torch.load(config.MODEL.RESUME, map_location="cpu")
+def load_training_checkpoint(
+    checkpoint_file, optimizer, lr_scheduler, loss_scaler, logger
+) -> None:
+    logger.info("Loading training checkpoint. [path: %s]", checkpoint_file)
+    checkpoint = torch.load(checkpoint_file, map_location="cpu")
 
     optimizer.load_state_dict(checkpoint["optimizer"])
     lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
@@ -54,7 +52,7 @@ def load_training_checkpoint(config, optimizer, lr_scheduler, loss_scaler, logge
 
     logger.info(
         "Loaded training checkpoint. [path: %s, epoch: %d]",
-        config.MODEL.RESUME,
+        checkpoint_file,
         checkpoint["epoch"],
     )
 
@@ -70,7 +68,15 @@ def _hierarchical_bias_k(i):
     return f"head.heads.{i}.bias"
 
 
-def handle_linear_head(config, model, state_dict, logger):
+def map_linear_head(state_dict, *, map_path, pt_head: str, c_head: str):
+    with open(map_path) as f:
+        map_indices = [int(id22k.strip()) for id22k in f.readlines()]
+
+    state_dict[f"{c_head}.weight"] = state_dict[f"{pt_head}.weight"][map_indices, :]
+    state_dict[f"{c_head}.bias"] = state_dict[f"{pt_head}.bias"][map_indices]
+
+
+def handle_linear_head(config, model, state_dict, logger) -> set[str]:
     """
     Check classifier, if not match, then re-init classifier to zero
     Ways it could not match:
@@ -91,6 +97,7 @@ def handle_linear_head(config, model, state_dict, logger):
 
     pretrained_hierarchical = _hierarchical_bias_k(0) in state_dict
     current_hierarchical = config.HIERARCHICAL
+    okay_missing_keys = set()
 
     if not pretrained_hierarchical and not current_hierarchical:
         # TESTED because Microsoft wrote this code.
@@ -101,29 +108,34 @@ def handle_linear_head(config, model, state_dict, logger):
         head_bias_pretrained = state_dict["head.bias"]
         num_classes_pretrained = head_bias_pretrained.shape[0]
         num_classes = model.head.bias.shape[0]
-        if num_classes_pretrained != num_classes:
-            if num_classes_pretrained == 21841 and num_classes == 1000:
-                logger.info("loading ImageNet-22K weight to ImageNet-1K ......")
-                map22kto1k_path = "data/map22kto1k.txt"
-                with open(map22kto1k_path) as f:
-                    map22kto1k = f.readlines()
-                map22kto1k = [int(id22k.strip()) for id22k in map22kto1k]
-                state_dict["head.weight"] = state_dict["head.weight"][map22kto1k, :]
-                state_dict["head.bias"] = state_dict["head.bias"][map22kto1k]
-            else:
-                torch.nn.init.constant_(model.head.bias, 0.0)
-                torch.nn.init.constant_(model.head.weight, 0.0)
-                del state_dict["head.weight"]
-                del state_dict["head.bias"]
-                logger.warning(
-                    "Error in loading classifier head, re-init classifier head to 0"
-                )
+        if num_classes_pretrained == num_classes:
+            pass  # Don't need to do anything
+        elif config.MODEL.LINEAR_HEAD_MAP_FILE:
+            map_linear_head(
+                state_dict,
+                map_path=config.MODEL.LINEAR_HEAD_MAP_FILE,
+                pt_head="head",
+                c_head="head",
+            )
+        else:
+            # Sam: not sure why we want to re-initialize the head weights to 0.
+            # Won't that make it impossible to learn anything?
+            torch.nn.init.constant_(model.head.bias, 0.0)
+            torch.nn.init.constant_(model.head.weight, 0.0)
+            del state_dict["head.weight"]
+            del state_dict["head.bias"]
+            logger.warning(
+                "Error in loading classifier head, re-init classifier head to 0"
+            )
     elif pretrained_hierarchical and not current_hierarchical:
-        # UNTESTED
         assert (
             "head.bias" not in state_dict
         ), "Should not have a single pre-trained linear head"
         assert hasattr(model.head, "bias"), "Should have a single random linear head"
+
+        # Going to try to use the pretrained fine-grained linear head as the
+        # initialization for the current model.
+
         # Increment finegrained level until the key doesn't exist.
         # Then it is the last level in the hierarchical model
         max_level = -1
@@ -134,20 +146,28 @@ def handle_linear_head(config, model, state_dict, logger):
             _hierarchical_bias_k(max_level)
         ].shape[0]
         num_classes = model.head.bias.shape[0]
-        if num_classes == finegrained_num_classes_pretrained == 10_000:
-            # Probably fine-tuning on iNat21
-            logger.warn(
-                "Assuming that you pre-trained on iNat21 and are now fine-tuning on iNat21."
-            )
+
+        if finegrained_num_classes_pretrained == num_classes:
+            # Direct mapping
             state_dict["head.weight"] = state_dict[_hierarchical_weight_k(max_level)]
             state_dict["head.bias"] = state_dict[_hierarchical_bias_k(max_level)]
+        elif config.MODEL.LINEAR_HEAD_MAP_FILE:
+            map_linear_head(
+                state_dict,
+                map_path=config.MODEL.LINEAR_HEAD_MAP_FILE,
+                pt_head=f"head.heads.{max_level}",
+                c_head="head",
+            )
         else:
-            for i in range(max_level):
-                del state_dict[_hierarchical_weight_k(i)]
-                del state_dict[_hierarchical_bias_k(i)]
+            okay_missing_keys = {"head.bias", "head.weight"}
             logger.warning(
                 "Error in loading classifier head, using default initialization."
             )
+
+        for i in range(max_level):
+            del state_dict[_hierarchical_weight_k(i)]
+            del state_dict[_hierarchical_bias_k(i)]
+
     elif not pretrained_hierarchical and current_hierarchical:
         # UNTESTED
         assert "head.bias" in state_dict, "Should have a single pre-trained linear head"
@@ -211,33 +231,59 @@ def handle_linear_head(config, model, state_dict, logger):
         else:
             logger.info("Using pre-trained hierarchical head.")
 
+    return okay_missing_keys
+
 
 def load_pretrained(config, model, logger):
-    logger.info(
-        f"==============> Loading weight {config.MODEL.PRETRAINED} for fine-tuning......"
-    )
+    logger.info("Loading weights for fine-tuning. [path: %s]", config.MODEL.PRETRAINED)
     checkpoint = torch.load(config.MODEL.PRETRAINED, map_location="cpu")
     state_dict = checkpoint["model"]
 
-    # delete relative_position_index since we always re-init it
+    # delete relative_position_index since we always re-init it (it's a fixed buffer).
     relative_position_index_keys = [
         k for k in state_dict.keys() if "relative_position_index" in k
     ]
     for k in relative_position_index_keys:
         del state_dict[k]
 
-    # delete relative_coords_table since we always re-init it
-    relative_position_index_keys = [
+    # delete relative_coords_table since we always re-init it (it's a fixed buffer).
+    relative_coords_table_keys = [
         k for k in state_dict.keys() if "relative_coords_table" in k
     ]
-    for k in relative_position_index_keys:
+    for k in relative_coords_table_keys:
         del state_dict[k]
 
-    # delete attn_mask since we always re-init it
+    # delete attn_mask since we always re-init it (also a fixed buffer).
     attn_mask_keys = [k for k in state_dict.keys() if "attn_mask" in k]
     for k in attn_mask_keys:
         del state_dict[k]
 
+    # These functions only change the positional parameters if there is a change
+    # in model architecture (image size, patch size, etc).
+    interpolate_rel_pos_bias(state_dict, model, logger)
+    interpolate_abs_pos_embed(state_dict, model, logger)
+
+    # This function handles changes in the linear head (from hierarchical pretraining
+    # to traditional classification, for instance.
+    okay_missing_head_keys = handle_linear_head(config, model, state_dict, logger)
+
+    msg = model.load_state_dict(state_dict, strict=False)
+    for key in msg.missing_keys:
+        assert (
+            key in okay_missing_head_keys
+            or key in relative_coords_table_keys
+            or key in relative_position_index_keys
+            or key in attn_mask_keys
+        ), f"Should only reinitialize relative positional information, not '{key}'"
+    logger.warning(msg)
+
+    logger.info(f"=> loaded successfully '{config.MODEL.PRETRAINED}'")
+
+    del checkpoint
+    torch.cuda.empty_cache()
+
+
+def interpolate_rel_pos_bias(state_dict, model, logger):
     # bicubic interpolate relative_position_bias_table if not match
     relative_position_bias_table_keys = [
         k for k in state_dict.keys() if "relative_position_bias_table" in k
@@ -249,24 +295,25 @@ def load_pretrained(config, model, logger):
         L2, nH2 = relative_position_bias_table_current.size()
         if nH1 != nH2:
             logger.warning(f"Error in loading {k}, passing......")
-        else:
-            if L1 != L2:
-                # bicubic interpolate relative_position_bias_table if not match
-                S1 = int(L1**0.5)
-                S2 = int(L2**0.5)
-                relative_position_bias_table_pretrained_resized = (
-                    torch.nn.functional.interpolate(
-                        relative_position_bias_table_pretrained.permute(1, 0).view(
-                            1, nH1, S1, S1
-                        ),
-                        size=(S2, S2),
-                        mode="bicubic",
-                    )
+        elif L1 != L2:
+            # bicubic interpolate relative_position_bias_table if not match
+            S1 = int(L1**0.5)
+            S2 = int(L2**0.5)
+            relative_position_bias_table_pretrained_resized = (
+                torch.nn.functional.interpolate(
+                    relative_position_bias_table_pretrained.permute(1, 0).view(
+                        1, nH1, S1, S1
+                    ),
+                    size=(S2, S2),
+                    mode="bicubic",
                 )
-                state_dict[k] = relative_position_bias_table_pretrained_resized.view(
-                    nH2, L2
-                ).permute(1, 0)
+            )
+            state_dict[k] = relative_position_bias_table_pretrained_resized.view(
+                nH2, L2
+            ).permute(1, 0)
 
+
+def interpolate_abs_pos_embed(state_dict, model, logger):
     # bicubic interpolate absolute_pos_embed if not match
     absolute_pos_embed_keys = [
         k for k in state_dict.keys() if "absolute_pos_embed" in k
@@ -279,42 +326,25 @@ def load_pretrained(config, model, logger):
         _, L2, C2 = absolute_pos_embed_current.size()
         if C1 != C1:
             logger.warning(f"Error in loading {k}, passing......")
-        else:
-            if L1 != L2:
-                S1 = int(L1**0.5)
-                S2 = int(L2**0.5)
-                absolute_pos_embed_pretrained = absolute_pos_embed_pretrained.reshape(
-                    -1, S1, S1, C1
-                )
-                absolute_pos_embed_pretrained = absolute_pos_embed_pretrained.permute(
-                    0, 3, 1, 2
-                )
-                absolute_pos_embed_pretrained_resized = torch.nn.functional.interpolate(
-                    absolute_pos_embed_pretrained, size=(S2, S2), mode="bicubic"
-                )
-                absolute_pos_embed_pretrained_resized = (
-                    absolute_pos_embed_pretrained_resized.permute(0, 2, 3, 1)
-                )
-                absolute_pos_embed_pretrained_resized = (
-                    absolute_pos_embed_pretrained_resized.flatten(1, 2)
-                )
-                state_dict[k] = absolute_pos_embed_pretrained_resized
-
-    handle_linear_head(config, model, state_dict, logger)
-
-    msg = model.load_state_dict(state_dict, strict=False)
-    for key in msg.missing_keys:
-        assert (
-            "relative_coords_table" in key
-            or "relative_position_index" in key
-            or "attn_mask" in key
-        ), f"Should only reinitialize relative positional information, not '{key}'"
-    logger.warning(msg)
-
-    logger.info(f"=> loaded successfully '{config.MODEL.PRETRAINED}'")
-
-    del checkpoint
-    torch.cuda.empty_cache()
+        elif L1 != L2:
+            S1 = int(L1**0.5)
+            S2 = int(L2**0.5)
+            absolute_pos_embed_pretrained = absolute_pos_embed_pretrained.reshape(
+                -1, S1, S1, C1
+            )
+            absolute_pos_embed_pretrained = absolute_pos_embed_pretrained.permute(
+                0, 3, 1, 2
+            )
+            absolute_pos_embed_pretrained_resized = torch.nn.functional.interpolate(
+                absolute_pos_embed_pretrained, size=(S2, S2), mode="bicubic"
+            )
+            absolute_pos_embed_pretrained_resized = (
+                absolute_pos_embed_pretrained_resized.permute(0, 2, 3, 1)
+            )
+            absolute_pos_embed_pretrained_resized = (
+                absolute_pos_embed_pretrained_resized.flatten(1, 2)
+            )
+            state_dict[k] = absolute_pos_embed_pretrained_resized
 
 
 def save_checkpoint(

@@ -1,7 +1,7 @@
 import concurrent.futures
-import contextlib
 import dataclasses
 import json
+import operator
 import os
 import pathlib
 import shutil
@@ -187,8 +187,10 @@ class BoundedExecutor:
 
 
 def inat21(inat19_path, inat21_path, output_path):
-    inat21_labels: dict[Label, int] = {}
+    output_path = pathlib.Path(output_path)
+    inat19_path = pathlib.Path(inat19_path)
 
+    inat21_labels: dict[Label, int] = {}
     with os.scandir(inat21_path) as it:
         for entry in it:
             if entry.is_file():
@@ -197,29 +199,33 @@ def inat21(inat19_path, inat21_path, output_path):
             number, label = parse_label_with_number(entry.name)
             inat21_labels[label] = number
 
-    output_path = pathlib.Path(output_path)
-
     inat19_labels: set[Label] = set()
     with os.scandir(inat19_path) as it:
         for entry in it:
             if entry.is_file():
                 continue
 
-            label = parse_label(entry.name)
-            inat19_labels.add(label)
+            inat19_labels.add(parse_label(entry.name))
 
     try:
         pool = BoundedExecutor()
-        for label, number in inat21_labels.items():
+        label_map = []
+        for label, number in sorted(inat21_labels.items(), key=operator.itemgetter(1)):
             if label not in inat19_labels:
                 continue
 
             pool.submit(
                 shutil.copytree,
-                entry.path,
+                str(inat19_path / label.foldername()),
                 str(output_path / "val" / label.foldername(number)),
                 dirs_exist_ok=True,
             )
+            label_map.append(number)
+
+        with open("src/data/inat21_inat19_map.txt", "w") as fd:
+            for inat21_label in label_map:
+                fd.write(f"{inat21_label}\n")
+
         pool.finish(desc="Copying folders")
     finally:
         pool.shutdown()
@@ -235,19 +241,19 @@ class Label:
     genus: str
     species: str
 
-    def foldername(self, number) -> str:
-        return "_".join(
-            (
-                str(number).zfill(5),
-                self.kingdom.title(),
-                self.phylum.title(),
-                self.cls.title(),
-                self.order.title(),
-                self.family.title(),
-                self.genus.title(),
-                self.species.lower(),
-            )
-        )
+    def foldername(self, number=None) -> str:
+        parts = [
+            self.kingdom.title(),
+            self.phylum.title(),
+            self.cls.title(),
+            self.order.title(),
+            self.family.title(),
+            self.genus.title(),
+            self.species.lower(),
+        ]
+        if number is not None:
+            parts.insert(0, str(number).zfill(5))
+        return "_".join(parts)
 
     def __eq__(self, other):
         if not isinstance(other, Label):

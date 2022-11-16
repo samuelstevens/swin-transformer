@@ -50,11 +50,13 @@ _C.MODEL = CN()
 _C.MODEL.TYPE = "swin"
 # Model name
 _C.MODEL.NAME = "swin_tiny_patch4_window7_224"
-# Pretrained weight from checkpoint, could be imagenet22k pretrained weight
-# could be overwritten by command line argument
+# Pretrained weight from checkpoint, could be imagenet22k pretrained weight. Could be
+# overwritten by command line argument
 _C.MODEL.PRETRAINED = ""
-# Checkpoint to resume, could be overwritten by command line argument
-_C.MODEL.RESUME = ""
+# Path to file that maps the pretraining task classes to the current task classes.
+# Empty means no such mapping exists.
+# src/data/map22kto1k.txt is the map for imagenet22k to imagenet1k.
+_C.MODEL.LINEAR_HEAD_MAP_FILE = ""
 # Number of classes, overwritten in data preparation
 _C.MODEL.NUM_CLASSES = 1000
 # Dropout rate
@@ -157,8 +159,6 @@ _C.TRAIN.WARMUP_LR = 5e-7
 _C.TRAIN.MIN_LR = 5e-6
 # Clip gradient norm
 _C.TRAIN.CLIP_GRAD = 5.0
-# Auto resume from latest checkpoint
-_C.TRAIN.AUTO_RESUME = True
 # Gradient accumulation steps
 # could be overwritten by command line argument
 _C.TRAIN.ACCUMULATION_STEPS = 1
@@ -262,8 +262,6 @@ _C.ENABLE_AMP = False
 
 # Enable Pytorch automatic mixed precision (amp).
 _C.AMP_ENABLE = True
-# [Deprecated] Mixed precision opt level of apex, if O0, no apex amp is used ('O0', 'O1', 'O2')
-_C.AMP_OPT_LEVEL = ""
 # Path to output folder, overwritten by command line argument
 _C.OUTPUT = ""
 # Frequency to save checkpoint
@@ -272,8 +270,11 @@ _C.SAVE_FREQ = 1
 _C.PRINT_FREQ = 10
 # Fixed random seed
 _C.SEED = 0
-# Perform evaluation only, overwritten by command line argument
-_C.EVAL_MODE = False
+# One of "train", "tune" or "eval".
+# "train" means pretraining, on large-scale data. This includes wandb logging, slack alerts, easy resuming, but no wandb sweeps.
+# "tune" means finetuning, typically on smaller-scale data. This means there is wandb logging and sweeps, but no wandb slack alerts and does not support easily resuming runs.
+# "eval" is evaluation only. Nothing is re-initialized, and results are not logged to wandb.
+_C.MODE = "train"
 # Test throughput only, overwritten by command line argument
 _C.THROUGHPUT_MODE = False
 # local rank for DistributedDataParallel, given by command line argument
@@ -321,20 +322,14 @@ def update_config(config, args):
         config.DATA.CACHE_MODE = args.cache_mode
     if _check_args("pretrained"):
         config.MODEL.PRETRAINED = args.pretrained
-    if _check_args("resume"):
-        config.MODEL.RESUME = args.resume
     if _check_args("use_checkpoint"):
         config.TRAIN.USE_CHECKPOINT = True
-    if _check_args("amp_opt_level"):
-        print("[warning] Apex amp has been deprecated, please use pytorch amp instead!")
-        if args.amp_opt_level == "O0":
-            config.AMP_ENABLE = False
     if _check_args("disable_amp"):
         config.AMP_ENABLE = False
     if _check_args("output"):
         config.OUTPUT = args.output
-    if _check_args("eval"):
-        config.EVAL_MODE = True
+    if _check_args("mode"):
+        config.MODE = args.mode
     if _check_args("throughput"):
         config.THROUGHPUT_MODE = True
 
@@ -356,35 +351,11 @@ def update_config(config, args):
         # set local rank for distributed training
         config.LOCAL_RANK = int(os.environ["LOCAL_RANK"])
 
-    # Use this to calculate accumulation steps
-    if "LOCAL_WORLD_SIZE" in os.environ:
-
-        def divide_cleanly(a, b):
-            assert a % b == 0, f"{a} / {b} has remainder {a % b}"
-            return a // b
-
-        n_procs = int(os.environ["LOCAL_WORLD_SIZE"])
-        desired_device_batch_size = divide_cleanly(
-            config.TRAIN.GLOBAL_BATCH_SIZE, n_procs
-        )
-        actual_device_batch_size = config.TRAIN.DEVICE_BATCH_SIZE
-
-        if actual_device_batch_size > desired_device_batch_size:
-            print(
-                f"Decreasing device batch size from {actual_device_batch_size} to {desired_device_batch_size} so your global bath size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {desired_device_batch_size * n_procs}!"
-            )
-            config.TRAIN.ACCUMULATION_STEPS = 1
-            config.TRAIN.DEVICE_BATCH_SIZE = desired_device_batch_size
-        elif desired_device_batch_size == actual_device_batch_size:
-            config.TRAIN.ACCUMULATION_STEPS = 1
-        else:
-            assert desired_device_batch_size > actual_device_batch_size
-            config.TRAIN.ACCUMULATION_STEPS = divide_cleanly(
-                desired_device_batch_size, actual_device_batch_size
-            )
-            print(
-                f"Using {config.TRAIN.ACCUMULATION_STEPS} accumulation steps so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {actual_device_batch_size * n_procs}!"
-            )
+    assert config.MODE in (
+        "train",
+        "test",
+        "eval",
+    ), f"config MODE must be one of 'train', 'test', or 'eval', not '{config.MODE}'"
 
     # output folder
     config.OUTPUT = os.path.join(config.OUTPUT, config.EXPERIMENT.NAME)

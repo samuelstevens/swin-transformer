@@ -51,6 +51,7 @@ if not string length -q -- $RUN_OUTPUT
 end
 
 set launcher $VENV/bin/torchrun
+set script -m src.main
 
 # --batch size
 set batch_size 256
@@ -86,9 +87,10 @@ end
 # Has to come after nprocs because it modifies nprocs
 if not test -z $_flag_debug
     set nprocs 1
+    set script -m pdb -c continue $script
 end
 
-if set -q $argv[1]
+if set -q argv[1]
     # There is at least one remaining variable.
     # Confirm that this is really what you want to do
     echo "Do you want to pass the additional arguments"
@@ -108,7 +110,7 @@ end
 
 OMP_NUM_THREADS=32 $launcher --nproc_per_node $nprocs \
     --master_port $port \
-    main.py \
+    $script \
     --cfg $_flag_config \
     --data-path $_flag_data \
     --output $RUN_OUTPUT \

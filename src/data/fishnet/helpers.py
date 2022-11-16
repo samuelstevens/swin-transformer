@@ -42,7 +42,7 @@ def load_statistics(directory, expected_channels=3, atol=1e-5):
     try:
         threadpool = concurrent.futures.ThreadPoolExecutor()
         filepaths = []
-        for (dirpath, dirnames, filenames) in os.walk(directory):
+        for (dirpath, _, filenames) in os.walk(directory):
             for filename in filenames:
                 if not extension_matches(filename):
                     continue

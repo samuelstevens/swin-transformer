@@ -3,4 +3,4 @@ fmt:
 	fd -e py --exclude object-detection/ | xargs black
 
 lint:
-	fd -e py --exclude object-detection/ | xargs flake8
+	fd -e py . src/ --exclude '*simmim*' --exclude '*moe*' | xargs flake8

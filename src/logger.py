@@ -10,7 +10,6 @@ import logging
 import os
 import sys
 
-import torch
 from termcolor import colored
 
 import wandb

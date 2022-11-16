@@ -71,7 +71,7 @@ def build_loader(config):
 
     mixup_fn = None
 
-    if not config.EVAL_MODE:
+    if config.MODE in ("train", "tune"):
         dataset_train, _ = build_dataset(is_train=True, config=config)
         print(f"Rank {config.LOCAL_RANK}/{dist.get_rank()} built train dataset.")
 
@@ -168,7 +168,7 @@ def build_dataset(is_train, config):
             nb_classes = dataset.num_classes
         else:
             dataset = datasets.ImageFolder(root, transform=transform)
-            nb_classes = 10_000
+            nb_classes = len(dataset.classes)
     elif config.DATA.DATASET == "tiger-beetle":
         if config.DATA.ZIP_MODE:
             raise NotImplementedError("We do not support zipped tiger-beetle")

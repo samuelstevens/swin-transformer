@@ -27,6 +27,7 @@ from .lr_scheduler import build_scheduler
 from .models import build_model
 from .optimizer import build_optimizer
 from .utils import (
+    NativeScalerWithGradNormCount,
     auto_resume_helper,
     batch_size_of,
     load_model_checkpoint,
@@ -102,7 +103,11 @@ def make_parser():
         help="root of output folder, the full path is <output>/<model_name>/<tag> (default: output)",
     )
     parser.add_argument("--tag", help="tag of experiment")
-    parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
+    parser.add_argument(
+        "--mode",
+        help="Which mode to use. 'train' is pre-training, 'tune' is fine-tuning on smaller data and 'eval' is evaluation only.",
+        choices=["train", "tune", "eval"],
+    )
     parser.add_argument(
         "--throughput", action="store_true", help="Test throughput only"
     )
@@ -134,7 +139,100 @@ def parse_options(parser):
     return args, config
 
 
+def scale_lr(config):
+    # Linearly scale the learning rate according to total batch size. May not be optimal
+    scaling_factor = (
+        config.TRAIN.DEVICE_BATCH_SIZE
+        * dist.get_world_size()
+        * config.TRAIN.ACCUMULATION_STEPS
+        / 512.0  # Use 512 as default batch size
+    )
+
+    config.defrost()
+    config.TRAIN.BASE_LR *= scaling_factor
+    config.TRAIN.WARMUP_LR *= scaling_factor
+    config.TRAIN.MIN_LR *= scaling_factor
+    config.freeze()
+
+
+def fix_batch_size(config):
+    if "WORLD_SIZE" not in os.environ:
+        # Not distributed
+        return
+
+    def divide_cleanly(a, b):
+        assert a % b == 0, f"{a} / {b} has remainder {a % b}"
+        return a // b
+
+    n_procs = int(os.environ["WORLD_SIZE"])
+    desired_device_batch_size = divide_cleanly(config.TRAIN.GLOBAL_BATCH_SIZE, n_procs)
+    actual_device_batch_size = config.TRAIN.DEVICE_BATCH_SIZE
+
+    if actual_device_batch_size > desired_device_batch_size:
+        print(
+            f"Decreasing device batch size from {actual_device_batch_size} to {desired_device_batch_size} so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not                {desired_device_batch_size * n_procs}!"
+        )
+        config.TRAIN.ACCUMULATION_STEPS = 1
+        config.TRAIN.DEVICE_BATCH_SIZE = desired_device_batch_size
+    elif desired_device_batch_size == actual_device_batch_size:
+        config.TRAIN.ACCUMULATION_STEPS = 1
+    else:
+        assert desired_device_batch_size > actual_device_batch_size
+        config.TRAIN.ACCUMULATION_STEPS = divide_cleanly(
+            desired_device_batch_size, actual_device_batch_size
+        )
+        print(
+            f"Using {config.TRAIN.ACCUMULATION_STEPS} accumulation steps so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {actual_device_batch_size * n_procs}!"
+        )
+
+
+def load_sweep_config(config):
+    # Ignore sweeps for now.
+    return
+
+    if not config.SWEEP.ENABLED:
+        # Not doing a wandb sweep
+        return
+
+    wandb = None  # this will break if you do a sweep
+
+    config.TRAIN.BASE_LR = wandb.config.BASE_LR
+    config.TRAIN.GLOBAL_BATCH_SIZE = wandb.config.GLOBAL_BATCH_SIZE
+    config.TRAIN.EPOCHS = wandb.config.EPOCHS
+    config.TRAIN.WARMUP_EPOCHS = wandb.config.WARMUP_EPOCHS
+    config.TRAIN.WEIGHT_DECAY = wandb.config.WEIGHT_DECAY
+    config.MODEL.DROP_PATH_RATE = wandb.config.DROP_PATH_RATE
+
+    config.OUTPUT = os.path.join(config.OUTPUT, wandb_writer.name)
+
+
 def main(config):
+    wandb_writer.init(config)
+
+    config.defrost()
+
+    load_sweep_config(config)
+    fix_batch_size(config)
+    scale_lr(config)
+
+    config.freeze()
+
+    # Logger initialization
+    os.makedirs(config.OUTPUT, exist_ok=True)
+    logger = create_logger(
+        output_dir=config.OUTPUT,
+        dist_rank=dist.get_rank(),
+        name=config.EXPERIMENT.NAME,
+    )
+    if dist.get_rank() == 0:
+        path = os.path.join(config.OUTPUT, "config.yaml")
+        with open(path, "w") as f:
+            f.write(config.dump())
+        logger.info(f"Full config saved to {path}")
+
+    logger.info(config.dump())
+    logger.info(json.dumps(vars(args)))
+
     (
         dataset_train,
         dataset_val,
@@ -169,34 +267,29 @@ def main(config):
 
     max_accuracy = 0.0
 
-    if config.TRAIN.AUTO_RESUME:
-        resume_file = auto_resume_helper(config.OUTPUT)
-        if resume_file:
-            if config.MODEL.RESUME:
-                logger.warning(
-                    f"auto-resume changing resume file from {config.MODEL.RESUME} to {resume_file}"
-                )
-            config.defrost()
-            config.MODEL.RESUME = resume_file
-            config.freeze()
-            logger.info(f"auto resuming from {resume_file}")
-        else:
-            logger.info(f"no checkpoint found in {config.OUTPUT}, ignoring auto resume")
-
-    if config.MODEL.RESUME:
+    # Resuming
+    checkpoint_file = auto_resume_helper(config.OUTPUT)
+    if checkpoint_file:
+        logger.info("Resuming. [path: %s]", checkpoint_file)
         # Resuming training on this dataset.
-        checkpoint = load_model_checkpoint(config, model_without_ddp, logger)
+        checkpoint = load_model_checkpoint(checkpoint_file, model_without_ddp, logger)
+
+        logger.warn(checkpoint.msg)
 
         max_accuracy = checkpoint.max_accuracy
+
         config.defrost()
         config.TRAIN.START_EPOCH = checkpoint.start_epoch
         config.freeze()
-    elif config.MODEL.PRETRAINED:
+    else:
+        logger.info("No checkpoint found. [path: %s]", config.OUTPUT)
+
+    if config.MODEL.PRETRAINED:
         # Loading from a pretrained checkpoint that might not be used on this dataset.
         load_pretrained(config, model_without_ddp, logger)
 
     acc1, acc5, loss = validate(
-        config, dataloader_val, model, config.TRAIN.START_EPOCH - 1
+        config, dataloader_val, model, config.TRAIN.START_EPOCH - 1, logger
     )
     logger.info(
         "[acc1: %.1f, acc5: %.1f, loss: %.3f, test images: %d, prev acc1: %.1f]",
@@ -207,7 +300,7 @@ def main(config):
         max_accuracy,
     )
 
-    if config.EVAL_MODE:
+    if config.MODE == "eval":
         return
 
     if config.THROUGHPUT_MODE:
@@ -221,9 +314,11 @@ def main(config):
     criterion = build_loss_criterion(config)
     logger.info("Loss function: %s", criterion)
 
-    if config.MODEL.RESUME:
+    if checkpoint_file:
         # Resuming training on this dataset.
-        load_training_checkpoint(config, optimizer, lr_scheduler, loss_scaler, logger)
+        load_training_checkpoint(
+            checkpoint_file, optimizer, lr_scheduler, loss_scaler, logger
+        )
 
     logger.info("Start training")
     start_time = time.time()
@@ -240,6 +335,7 @@ def main(config):
             mixup_fn,
             lr_scheduler,
             loss_scaler,
+            logger,
         )
         if dist.get_rank() == 0 and (
             epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)
@@ -255,7 +351,7 @@ def main(config):
                 logger,
             )
 
-        acc1, acc5, loss = validate(config, dataloader_val, model, epoch)
+        acc1, acc5, loss = validate(config, dataloader_val, model, epoch, logger)
         logger.info(
             f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%"
         )
@@ -277,6 +373,7 @@ def train_one_epoch(
     mixup_fn,
     lr_scheduler,
     loss_scaler,
+    logger,
 ):
     model.train()
     optimizer.zero_grad()
@@ -379,7 +476,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def validate(config, dataloader, model, epoch):
+def validate(config, dataloader, model, epoch, logger):
     if config.HIERARCHICAL:
         criterion = FineGrainedCrossEntropyLoss()
     else:
@@ -465,9 +562,7 @@ if __name__ == "__main__":
     parser = make_parser()
     args, config = parse_options(parser)
 
-    if config.AMP_OPT_LEVEL:
-        print("[warning] Apex amp has been deprecated, please use pytorch amp instead!")
-
+    # Initialize the distributed process.
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -475,12 +570,14 @@ if __name__ == "__main__":
     else:
         rank = -1
         world_size = -1
+
     torch.cuda.set_device(config.LOCAL_RANK)
     torch.distributed.init_process_group(
         backend="nccl", init_method="env://", world_size=world_size, rank=rank
     )
     torch.distributed.barrier()
 
+    # Set seed appropriately.
     seed = config.SEED + dist.get_rank()
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -488,55 +585,6 @@ if __name__ == "__main__":
     random.seed(seed)
     cudnn.benchmark = True
 
-    # linear scale the learning rate according to total batch size, may not be optimal
-    linear_scaled_lr = (
-        config.TRAIN.BASE_LR
-        * config.TRAIN.DEVICE_BATCH_SIZE
-        * dist.get_world_size()
-        / 512.0
-    )
-    linear_scaled_warmup_lr = (
-        config.TRAIN.WARMUP_LR
-        * config.TRAIN.DEVICE_BATCH_SIZE
-        * dist.get_world_size()
-        / 512.0
-    )
-    linear_scaled_min_lr = (
-        config.TRAIN.MIN_LR
-        * config.TRAIN.DEVICE_BATCH_SIZE
-        * dist.get_world_size()
-        / 512.0
-    )
-    # gradient accumulation also need to scale the learning rate
-    if config.TRAIN.ACCUMULATION_STEPS > 1:
-        linear_scaled_lr = linear_scaled_lr * config.TRAIN.ACCUMULATION_STEPS
-        linear_scaled_warmup_lr = (
-            linear_scaled_warmup_lr * config.TRAIN.ACCUMULATION_STEPS
-        )
-        linear_scaled_min_lr = linear_scaled_min_lr * config.TRAIN.ACCUMULATION_STEPS
-    config.defrost()
-    config.TRAIN.BASE_LR = linear_scaled_lr
-    config.TRAIN.WARMUP_LR = linear_scaled_warmup_lr
-    config.TRAIN.MIN_LR = linear_scaled_min_lr
-    config.freeze()
-
-    os.makedirs(config.OUTPUT, exist_ok=True)
-    logger = create_logger(
-        output_dir=config.OUTPUT,
-        dist_rank=dist.get_rank(),
-        name=f"{config.EXPERIMENT.NAME}",
-    )
     wandb_writer = WandbWriter(rank=dist.get_rank())
-    wandb_writer.init(config)
-
-    if dist.get_rank() == 0:
-        path = os.path.join(config.OUTPUT, "config.yaml")
-        with open(path, "w") as f:
-            f.write(config.dump())
-        logger.info(f"Full config saved to {path}")
-
-    # print config
-    logger.info(config.dump())
-    logger.info(json.dumps(vars(args)))
 
     main(config)
