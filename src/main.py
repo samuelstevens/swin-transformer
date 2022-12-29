@@ -20,7 +20,8 @@ from timm.utils import AverageMeter
 
 from .config import get_config
 from .data import build_loader
-from .hierarchical import FineGrainedCrossEntropyLoss, accuracy
+from .hierarchical import FineGrainedLoss, accuracy
+# from .hierarchical import FineGrainedCrossEntropyLoss, accuracy
 from .logger import WandbWriter, create_logger
 from .loss_criterion import build_loss_criterion
 from .lr_scheduler import build_scheduler
@@ -205,6 +206,41 @@ def load_sweep_config(config):
 
     config.OUTPUT = os.path.join(config.OUTPUT, wandb_writer.name)
 
+def get_taxonomy(true_all_labels):
+
+    taxonomy={}
+    for label in range (len(true_all_labels[0])-1): 
+        label_pair=true_all_labels[:, label:label+2].squeeze(-1)
+        unique_label_pair=torch.unique(label_pair, dim=0)
+        nodes=torch.unique(unique_label_pair[:,0:1], dim=0).squeeze(-1)
+
+        pair_taxonomy={}
+        for node in nodes:
+            b=torch.nonzero(unique_label_pair[:, 0:1].squeeze(-1) == node).squeeze(-1)
+            a=unique_label_pair[:,[1]][b,:].squeeze(-1)
+            pair_taxonomy[int(node)]=a
+
+        taxonomy[label]=pair_taxonomy
+    return taxonomy
+
+
+def normalize_output(out):
+    prob_factor = 1 / torch.sum(out, axis=1)
+    return torch.mul(out, prob_factor[:, None])
+
+def cascading_output(taxonomy, outputs): 
+
+    cascaded_output=[]
+    cascaded_output.append(outputs[0])
+
+    for level in range (len(taxonomy)):
+        c_output=(torch.empty_like(outputs[level+1]))
+        for p in taxonomy[level].keys():
+            c_output[:, taxonomy[level][p]]=torch.mul(outputs[level+1][:, taxonomy[level][p]], cascaded_output[level][:, [p]])
+        c_output=normalize_output(c_output)
+        cascaded_output.append(c_output)
+
+    return cascaded_output
 
 def main(config):
     wandb_writer.init(config)
@@ -239,7 +275,10 @@ def main(config):
         dataloader_train,
         dataloader_val,
         mixup_fn,
+        all_target,
     ) = build_loader(config)
+
+    taxonomy=get_taxonomy(all_target)
 
     logger.info(f"Creating model: {config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
@@ -289,7 +328,7 @@ def main(config):
         load_pretrained(config, model_without_ddp, logger)
 
     acc1, acc5, loss = validate(
-        config, dataloader_val, model, config.TRAIN.START_EPOCH - 1, logger
+        config, dataloader_val, model, config.TRAIN.START_EPOCH - 1, logger, taxonomy
     )
     logger.info(
         "[acc1: %.1f, acc5: %.1f, loss: %.3f, test images: %d, prev acc1: %.1f]",
@@ -336,6 +375,7 @@ def main(config):
             lr_scheduler,
             loss_scaler,
             logger,
+            taxonomy,
         )
         if dist.get_rank() == 0 and (
             epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)
@@ -351,7 +391,7 @@ def main(config):
                 logger,
             )
 
-        acc1, acc5, loss = validate(config, dataloader_val, model, epoch, logger)
+        acc1, acc5, loss = validate(config, dataloader_val, model, epoch, logger, taxonomy)
         logger.info(
             f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%"
         )
@@ -374,6 +414,7 @@ def train_one_epoch(
     lr_scheduler,
     loss_scaler,
     logger,
+    taxonomy,
 ):
     model.train()
     optimizer.zero_grad()
@@ -395,6 +436,10 @@ def train_one_epoch(
 
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
+
+        outputs=cascading_output(taxonomy, outputs)
+        outputs=[torch.log(outs) for outs in outputs]
+
         loss = criterion(outputs, targets)
         loss = loss / config.TRAIN.ACCUMULATION_STEPS
 
@@ -476,11 +521,13 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def validate(config, dataloader, model, epoch, logger):
+def validate(config, dataloader, model, epoch, logger, taxonomy):
     if config.HIERARCHICAL:
-        criterion = FineGrainedCrossEntropyLoss()
+        # criterion = FineGrainedCrossEntropyLoss()
+        criterion = FineGrainedLoss()
     else:
-        criterion = torch.nn.CrossEntropyLoss()
+        # criterion = torch.nn.CrossEntropyLoss()
+        criterion = torch.nn.NLLLoss()
     model.eval()
 
     batch_time = AverageMeter()
@@ -496,6 +543,9 @@ def validate(config, dataloader, model, epoch, logger):
         # compute output
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             output = model(images)
+
+        # output=cascading_output(taxonomy, output)
+        output=[torch.log(out) for out in output]
 
         # measure accuracy and record loss
         loss = criterion(output, target)

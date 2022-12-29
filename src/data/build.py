@@ -65,6 +65,11 @@ def build_loader(config):
         drop_last=False,
     )
 
+    all_target=[]
+    for i in range(len(dataset_val)): #len(dataset_val)
+        all_target.append(dataset_val[i][1].tolist())
+    all_target=torch.tensor(all_target)
+
     # Make these guys into lists so they have a __len__
     dataset_train = []
     dataloader_train = []
@@ -125,7 +130,7 @@ def build_loader(config):
             else:
                 mixup_fn = Mixup(**mixup_args)
 
-    return dataset_train, dataset_val, dataloader_train, dataloader_val, mixup_fn
+    return dataset_train, dataset_val, dataloader_train, dataloader_val, mixup_fn, all_target
 
 
 def build_dataset(is_train, config):

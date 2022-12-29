@@ -21,7 +21,8 @@ class HierarchicalHead(nn.Module):
             assert num_class > 0
 
         self.heads = nn.ModuleList(
-            [nn.Linear(num_features, num_class) for num_class in self.num_classes]
+            [nn.Sequential(nn.Linear(num_features, num_class), nn.Softmax(1)) for num_class in self.num_classes]
+            # [nn.Linear(num_features, num_class) for num_class in self.num_classes]
         )
 
     def forward(self, x):

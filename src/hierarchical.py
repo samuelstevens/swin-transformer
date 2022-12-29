@@ -1,5 +1,6 @@
 import einops
 import torch
+import torch.nn as nn
 
 
 def accuracy(output, target, topk=(1,), hierarchy_level=-1):
@@ -34,7 +35,43 @@ def accuracy(output, target, topk=(1,), hierarchy_level=-1):
     ]
 
 
-class FineGrainedCrossEntropyLoss(torch.nn.CrossEntropyLoss):
+class LSR(nn.Module):
+
+    def __init__(self, reduction='mean'):
+        super().__init__()
+
+        self.reduction = reduction
+
+    def forward(self, x, target):
+
+        if x.size(0) != target.size(0):
+            raise ValueError('Expected input batchsize ({}) to match target batch_size({})'
+                             .format(x.size(0), target.size(0)))
+
+        if x.dim() < 2:
+            raise ValueError('Expected input tensor to have least 2 dimensions(got {})'
+                             .format(x.size(0)))
+
+        if x.dim() != 2:
+            raise ValueError('Only 2 dimension tensor are implemented, (got {})'
+                             .format(x.size()))
+
+        loss = torch.sum(- x * target, dim=1)
+
+        if self.reduction == 'none':
+            return loss
+
+        elif self.reduction == 'sum':
+            return torch.sum(loss)
+
+        elif self.reduction == 'mean':
+            return torch.mean(loss)
+
+        else:
+            raise ValueError('unrecognized option, expect reduction to be one of none, mean, sum')
+
+
+class FineGrainedLoss(torch.nn.NLLLoss):
     """
     A cross-entropy used with hierarchical inputs and targets and only
     looks at the finest-grained tier (the last level).
@@ -45,8 +82,7 @@ class FineGrainedCrossEntropyLoss(torch.nn.CrossEntropyLoss):
         fine_grained_targets = targets[:, -1]
         return super().forward(fine_grained_inputs, fine_grained_targets)
 
-
-class HierarchicalCrossEntropyLoss(torch.nn.CrossEntropyLoss):
+class HierarchicalLoss(LSR):
     def __init__(self, *args, coeffs=(1.0,), **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -58,6 +94,7 @@ class HierarchicalCrossEntropyLoss(torch.nn.CrossEntropyLoss):
         self.register_buffer("coeffs", coeffs)
 
     def forward(self, inputs, targets):
+
         if not isinstance(targets, list):
             targets = einops.rearrange(targets, "batch tiers -> tiers batch")
 
@@ -69,8 +106,9 @@ class HierarchicalCrossEntropyLoss(torch.nn.CrossEntropyLoss):
             [
                 # Need to specify arguments to super() because of some a bug
                 # with super() in list comprehensions/generators (unclear)
-                super(HierarchicalCrossEntropyLoss, self).forward(input, target)
+                super(HierarchicalLoss, self).forward(input, target)
                 for input, target in zip(inputs, targets)
+
             ]
         )
 
