@@ -118,15 +118,15 @@ def handle_linear_head(config, model, state_dict, logger) -> set[str]:
                 c_head="head",
             )
         else:
-            # Sam: not sure why we want to re-initialize the head weights to 0.
-            # Won't that make it impossible to learn anything?
-            torch.nn.init.constant_(model.head.bias, 0.0)
-            torch.nn.init.constant_(model.head.weight, 0.0)
             del state_dict["head.weight"]
             del state_dict["head.bias"]
+            # Re-inits the linear layer
+            model.head.reset_parameters()
+
             logger.warning(
-                "Error in loading classifier head, re-init classifier head to 0"
+                "Error in loading classifier head, randomly re-init classifier head."
             )
+            okay_missing_keys.update(['head.bias', 'head.weight'])
     elif pretrained_hierarchical and not current_hierarchical:
         assert (
             "head.bias" not in state_dict
