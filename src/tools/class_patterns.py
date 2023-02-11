@@ -40,6 +40,9 @@ groovy_grape_checkpoint_file = "/local/scratch/stevens.994/hierarchical-vision/p
 fuzzy_fig_checkpoint_file = "/local/scratch/stevens.994/hierarchical-vision/pretrained-checkpoints/fuzzy-fig-192-epoch89.pth"
 
 # Datapath and dataset
+# Note that if you change the dataset, you'll have to figure out a new way to get the
+# validation images for a given class. Look in get_images() and how it interacts with
+# image_from_dataset().
 data_path = "/local/scratch/cv_datasets/inat21/resize-192"
 dataset = "inat21"
 
@@ -48,10 +51,20 @@ dataset = "inat21"
 batch_size = 512
 
 
-def get_images(dataset, class_index):
-    cls_dir = pathlib.Path(dataset.root, dataset.classes[class_index])
+def image_from_dataset(dataset, image_index):
+    tensor = dataset[image_index][0]
+    arr = np.transpose(tensor.numpy(), (1, 2, 0))
+    # This gives the image human-like colors, but it is not the original image.
+    # But it's fine for our purposes. Just don't use this format as input to
+    # the model itself.
+    arr = ((arr - arr.min()) / (arr.max() - arr.min()) * 255).astype(np.uint8)
+    return PIL.Image.fromarray(arr)
 
-    return [PIL.Image.open(cls_dir / filename) for filename in os.listdir(cls_dir)]
+
+def get_images(dataset, class_index):
+    # This class_index * 10 + i only works for the inat21 validation dataset
+    # which has 10 validation images per class.
+    return [image_from_dataset(dataset, class_index * 10 + i) for i in range(10)]
 
 
 def join_images(images, *, n_wide=None, n_tall=1):
@@ -166,10 +179,21 @@ def build_loader(config):
     return dataset_val, dataloader_val
 
 
+def load_model_checkpoint(config, checkpoint_file, model, logger) -> str:
+    logger.info("Loading model checkpoint. [path: %s]", checkpoint_file)
+    checkpoint = torch.load(checkpoint_file, map_location="cpu")
+    state_dict = checkpoint["model"]
+
+    print(utils.handle_linear_head(config, model, state_dict, logger, strict=True))
+    msg = model.load_state_dict(state_dict, strict=False)
+
+    return msg
+
+
 def load_fuzzy_fig(config):
     dataset, dataloader = build_loader(config)
     model = models.build_model(config)
-    utils.load_model_checkpoint(fuzzy_fig_checkpoint_file, model, logger)
+    print(load_model_checkpoint(config, fuzzy_fig_checkpoint_file, model, logger))
     assert isinstance(model.head, torch.nn.Linear)
     return model, dataset, dataloader
 
@@ -177,7 +201,7 @@ def load_fuzzy_fig(config):
 def load_groovy_grape(config):
     dataset, dataloader = build_loader(config)
     model = models.build_model(config)
-    utils.load_model_checkpoint(groovy_grape_checkpoint_file, model, logger)
+    print(load_model_checkpoint(config, groovy_grape_checkpoint_file, model, logger))
     assert isinstance(
         model.head, torch.nn.Linear
     ), "Should only load a species-level head for groovy-grape"
