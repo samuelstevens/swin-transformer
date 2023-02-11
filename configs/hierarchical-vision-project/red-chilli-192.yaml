@@ -33,7 +33,7 @@ TRAIN:
   # Co-efficient value for computing weights (0.1,.0.2, ..., 0.9)
   ALPHA: 0.1  
   # choose a loss function to use for training
-  LOSS: fuzzy-fig # (default is fuzzy-fig) [fuzzy-fig, groovy-grape, hot-ice, red-chilli]
+  LOSS: red-chilli # (default is fuzzy-fig) [fuzzy-fig, groovy-grape, hot-ice, red-chilli]
 
   HIERARCHICAL_COEFFS: [ 8, 5.65, 4, 2.82, 2, 1.41, 1 ]
 
@@ -44,6 +44,6 @@ EXPERIMENT:
   NAME: red-chilli-192
   WANDB_ID: rcal001
 
-HIERARCHICAL: false #('false' to test fuzzy-fig loss)
+HIERARCHICAL: true #('false' to test fuzzy-fig loss)
 
 
