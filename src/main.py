@@ -22,7 +22,7 @@ from .config import get_config
 from .data import build_loader
 from .hierarchical import FineGrainedCrossEntropyLoss, accuracy
 from .logger import WandbWriter, create_logger
-from .loss_criterion import build_loss_criterion
+from .loss_criterion import build_loss_criterion, build_loss_criterion_red_chilli, build_loss_criterion_hot_ice
 from .lr_scheduler import build_scheduler
 from .models import build_model
 from .optimizer import build_optimizer
@@ -35,6 +35,9 @@ from .utils import (
     load_training_checkpoint,
     reduce_tensor,
     save_checkpoint,
+    find_experiments,
+    load_hierarchy,
+    get_weighting,
 )
 
 
@@ -44,9 +47,10 @@ def make_parser():
     )
     parser.add_argument(
         "--cfg",
+        nargs="+",
         type=str,
         required=True,
-        metavar="FILE",
+        # metavar="FILE",
         help="path to config file",
     )
     parser.add_argument(
@@ -127,16 +131,37 @@ def make_parser():
         type=str,
         help="overwrite optimizer if provided, can be adamw/sgd/fused_adam/fused_lamb.",
     )
+    # low-data-regieme; percentage of training data to be use for fine tuning
+    parser.add_argument(
+        "--low-data",
+        type=float,
+        help="percentage of training data (.01 to 1) to be used for fine tuning",
+    )
 
     return parser
 
+# specifically for low regime downstream task 
+class EarlyStopper:
+    def __init__(self, patience=1, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = np.inf
+
+    def early_stop(self, validation_loss):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
 
 def parse_options(parser):
     args, unparsed = parser.parse_known_args()
 
-    config = get_config(args)
-
-    return args, config
+    return args
 
 
 def scale_lr(config):
@@ -206,7 +231,7 @@ def load_sweep_config(config):
     config.OUTPUT = os.path.join(config.OUTPUT, wandb_writer.name)
 
 
-def main(config):
+def main(config, flag):
     wandb_writer.init(config)
 
     config.defrost()
@@ -244,6 +269,14 @@ def main(config):
     logger.info(f"Creating model: {config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
     logger.info(str(model))
+
+    print ("config.TRAIN.LOSS",config.TRAIN.LOSS)
+
+    # Added to incorporate tree-based hierarchy
+    if config.TRAIN.LOSS== "red-chilli" or "hot-ice":
+        hierarchy = load_hierarchy("inaturalist21-192", config.DATA.DATA_PATH)
+        weights = get_weighting(hierarchy, config.TRAIN.WEIGHTING, config.TRAIN.ALPHA)
+        classes = ['nat'+i.split('_', 1)[0][1:] for i in dataset_train.classes]
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"number of params: {n_parameters}")
@@ -307,12 +340,32 @@ def main(config):
         throughput(dataloader_val, model, logger)
         return
 
+    # For low data regieme to avoid overfitting
+    early_stopper = EarlyStopper(patience=3, min_delta=0.00001)
+
     lr_scheduler = build_scheduler(
         config, optimizer, len(dataloader_train) // config.TRAIN.ACCUMULATION_STEPS
     )
 
-    criterion = build_loss_criterion(config)
-    logger.info("Loss function: %s", criterion)
+
+    if config.TRAIN.LOSS == "fuzzy-fig" or config.TRAIN.LOSS == "groovy-grape":
+
+        criterion = build_loss_criterion(config)
+        logger.info("Loss function: %s", criterion)
+
+    elif config.TRAIN.LOSS == "hot-ice": #not yet functional  (head part has t mddify)
+
+        criterion = build_loss_criterion_hot_ice(config)
+        logger.info("Loss function: %s", criterion)
+
+    elif config.TRAIN.LOSS == "red-chilli":
+
+        criterion = build_loss_criterion_red_chilli(config, hierarchy, classes, weights)
+        logger.info("Loss function: %s", criterion)
+
+    else:
+        print ("Enter a valid loss function among fuzzy-fig, groovy-grape, hot-ice or red-chilli")
+        exit()
 
     if checkpoint_file:
         # Resuming training on this dataset.
@@ -358,6 +411,22 @@ def main(config):
         max_accuracy = max(max_accuracy, acc1)
         logger.info(f"Max accuracy: {max_accuracy:.2f}%")
 
+        if config.TRAIN.DATA_PERCENTAGE<1.0:
+            if early_stopper.early_stop(loss):
+                print ("early stop")
+                break
+
+    # The file stores the final results for each config file 
+    if flag==0:
+        global fw
+        fw= open(config.OUTPUT+'_results',"w+")
+        flag=flag+1
+
+    fw.write("The results of " + config.OUTPUT + " is ")
+    fw.write("val/acc1: ")
+    fw.write('%f' % max_accuracy)
+    fw.write("\n")
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info("Training time {}".format(total_time_str))
@@ -390,11 +459,27 @@ def train_one_epoch(
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
 
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
+        if config.TRAIN.LOSS == "fuzzy-fig" or config.TRAIN.LOSS == "groovy-grape": #have to make the ""HIERARCHICAL: false" is the yaml file for fuzzy-fig 
+            if mixup_fn is not None:
+                samples, targets = mixup_fn(samples, targets)
 
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-            outputs = model(samples)
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                outputs = model(samples)
+
+        elif config.TRAIN.LOSS == "hot-ice":
+
+            targets=targets[:,-1]
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                outputs = model(samples).type(torch.float32)
+
+        elif config.TRAIN.LOSS == "red-chilli":
+            # reverse the target columns
+            targets=torch.cat((torch.index_select(targets, 1, torch.LongTensor([6,5,4,3]).cuda()), torch.index_select(targets, 1, torch.LongTensor([2,1,0]).cuda())), dim=1)
+
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                outputs = model(samples)
+                outputs=[outputs[i].type(torch.float32) for i in range(len(outputs)-1,-1,-1)]
+
         loss = criterion(outputs, targets)
         loss = loss / config.TRAIN.ACCUMULATION_STEPS
 
@@ -560,7 +645,8 @@ def throughput(dataloader, model, logger):
 
 if __name__ == "__main__":
     parser = make_parser()
-    args, config = parse_options(parser)
+    # args, config = parse_options(parser)
+    args= parse_options(parser)
 
     # Initialize the distributed process.
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -571,20 +657,29 @@ if __name__ == "__main__":
         rank = -1
         world_size = -1
 
-    torch.cuda.set_device(config.LOCAL_RANK)
+    
     torch.distributed.init_process_group(
         backend="nccl", init_method="env://", world_size=world_size, rank=rank
     )
     torch.distributed.barrier()
 
-    # Set seed appropriately.
-    seed = config.SEED + dist.get_rank()
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    cudnn.benchmark = True
+    flag=-1 # reqd to generate output file only once  when in one go multiple .yaml files run one by one
+    for experiment_config in find_experiments(args.cfg):
 
-    wandb_writer = WandbWriter(rank=dist.get_rank())
+        args.cfg=experiment_config
+        config = get_config(args)
+        flag+=1
 
-    main(config)
+        torch.cuda.set_device(config.LOCAL_RANK)
+
+        # Set seed appropriately.
+        seed = config.SEED + dist.get_rank()
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        cudnn.benchmark = True
+
+        wandb_writer = WandbWriter(rank=dist.get_rank())
+
+        main(config, flag)
