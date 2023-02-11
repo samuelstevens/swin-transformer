@@ -12,6 +12,12 @@ import torch
 import torch.distributed as dist
 from torch._six import inf
 
+import pickle
+import lzma
+import numpy as np
+from math import exp, fsum
+from nltk.tree import Tree
+from copy import deepcopy
 
 @dataclasses.dataclass(frozen=True)
 class ModelCheckpoint:
@@ -467,3 +473,186 @@ class NativeScalerWithGradNormCount:
 
     def load_state_dict(self, state_dict):
         self._scaler.load_state_dict(state_dict)
+
+
+############################### Added below script to generate .yaml files  ###########################
+
+
+from typing import Any, Dict, Iterator, List, Mapping, Tuple
+from . import config
+
+def files_with_extension(paths: List[str], ext: str) -> Iterator[str]:
+    # add . to ext if it doesn't have it.
+    ext = "." + ext if ext[0] != "." else ext
+
+    for path in paths:
+        if os.path.isfile(path):
+            if path.endswith(ext):
+                yield path
+                continue
+
+        for dirpath, _, filenames in os.walk(path):
+            for filename in filenames:
+                if filename.endswith(ext):
+                    yield os.path.join(dirpath, filename) 
+
+def _flatten_dict_of_lists(
+    dict_of_lists: Mapping[object, List[object]],
+) -> Iterator[Dict[object, object]]:
+
+    assert isinstance(dict_of_lists, dict)
+
+    if not dict_of_lists:
+        yield dict_of_lists
+        return
+
+    field, value_list = dict_of_lists.popitem()
+
+    assert isinstance(value_list, list)
+
+    for value in value_list:
+        for flattened_dict in _flatten_dict_of_lists(dict_of_lists):
+            yield {**flattened_dict, field: value}
+    dict_of_lists[field] = value_list
+
+def flattened(obj: object) -> Iterator[Any]:
+    """
+    Given a list, dictionary, or other value, yields an iterator of dictionaries/other values with no lists anywhere inside the structure.
+    """
+    if not isinstance(obj, dict) and not isinstance(obj, list):
+        yield obj
+        return
+
+    if isinstance(obj, list):
+        for elem in obj:
+            yield from flattened(elem)
+        return
+
+    assert isinstance(obj, dict)
+    
+    if not obj:
+        yield obj
+        return
+    flat_list = {field: list(flattened(value)) for field, value in obj.items()}
+    yield from _flatten_dict_of_lists(flat_list)
+
+
+def find_experiments(paths): # -> Iterator[config.ExperimentConfig]:
+    """
+    Arguments:
+    * args (list[str]): list of strings that are either directories containing files or config files themselves.
+    """
+    if not isinstance(paths, list):
+        paths = [paths]
+
+    for config_file in files_with_extension(paths, ".yaml"):
+        yield config_file
+
+
+
+# Added to incorporate the new all-level hierarchical loss (paper: makes better mistakes)
+
+def get_label(node):
+    if isinstance(node, Tree):
+        return node.label()
+    else:
+        return node
+
+def load_hierarchy(dataset, data_dir):
+    """
+    Load the hierarchy corresponding to a given dataset.
+    Args:
+        dataset: The dataset name for which the hierarchy should be loaded.
+        data_dir: The directory where the hierarchy files are stored.
+    Returns:
+        A nltk tree whose labels corresponds to wordnet wnids.
+    """
+    if dataset in ["inaturalist21-192", "inaturalist21-224"]:
+        fname = os.path.join(data_dir, "inat21_tree.pkl")
+    # if dataset in ["tiered-imagenet-84", "tiered-imagenet-224"]:
+    #     fname = os.path.join(data_dir, "tiered_imagenet_tree.pkl")
+    # elif dataset in ["ilsvrc12", "imagenet"]:
+    #     fname = os.path.join(data_dir, "imagenet_tree.pkl")
+    # elif dataset in ["inaturalist19-84", "inaturalist19-224"]:
+    #     fname = os.path.join(data_dir, "inaturalist19_tree.pkl")
+    else:
+        raise ValueError("Unknown dataset {}".format(dataset))
+
+    with open(fname, "rb") as f:
+        return pickle.load(f)
+
+def get_uniform_weighting(hierarchy: Tree, value):
+    """
+    Construct unit weighting tree from hierarchy.
+
+    Args:
+        hierarchy: The hierarchy to use to generate the weights.
+        value: The value to fill the tree with.
+
+    Returns:
+        Weights as a nltk.Tree whose labels are the weights associated with the
+        parent edge.
+    """
+    weights = deepcopy(hierarchy)
+    for p in weights.treepositions():
+        node = weights[p]
+        if isinstance(node, Tree):
+            node.set_label(value)
+        else:
+            weights[p] = value
+    return weights
+
+
+def get_exponential_weighting(hierarchy: Tree, value, normalize=True):
+    """
+    Construct exponentially decreasing weighting, where each edge is weighted
+    according to its distance from the root as exp(-value*dist).
+
+    Args:
+        hierarchy: The hierarchy to use to generate the weights.
+        value: The decay value.
+        normalize: If True ensures that the sum of all weights sums
+            to one.
+
+    Returns:
+        Weights as a nltk.Tree whose labels are the weights associated with the
+        parent edge.
+    """
+    weights = deepcopy(hierarchy)
+    all_weights = []
+    for p in weights.treepositions():
+        node = weights[p]
+        weight = exp(-value * len(p))
+        all_weights.append(weight)
+        if isinstance(node, Tree):
+            node.set_label(weight)
+        else:
+            weights[p] = weight
+    total = fsum(all_weights)  # stable sum
+    if normalize:
+        for p in weights.treepositions():
+            node = weights[p]
+            if isinstance(node, Tree):
+                node.set_label(node.label() / total)
+            else:
+                weights[p] /= total
+    return weights
+
+
+def get_weighting(hierarchy: Tree, weighting, value):
+    """
+    Get different weightings of edges in a tree.
+
+    Args:
+        hierarchy: The tree to generate the weighting for.
+        weighting: The type of weighting, one of 'uniform', 'exponential'.
+        **kwards: Keyword arguments passed to the weighting function.
+    """
+    if weighting == "uniform":
+        return get_uniform_weighting(hierarchy, value)
+    elif weighting == "exponential":
+        return get_exponential_weighting(hierarchy, value)
+    else:
+        raise NotImplementedError("Weighting {} is not implemented".format(weighting))
+
+

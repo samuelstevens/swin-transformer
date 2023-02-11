@@ -80,6 +80,11 @@ def build_loader(config):
             n_examples = config.TRAIN.OVERFIT_BATCHES * config.TRAIN.DEVICE_BATCH_SIZE
             indices = random.sample(range(len(dataset_train)), n_examples)
             dataset_train = Subset(dataset_train, indices)
+        # Check if training is for low data regieme; select subset of data (script added)
+        if config.TRAIN.DATA_PERCENTAGE < 1:
+            n_examples = config.TRAIN.DATA_PERCENTAGE * len(dataset_train) 
+            indices = random.sample(range(len(dataset_train)), int(n_examples))
+            dataset_train = Subset(dataset_train, indices)
 
         num_tasks = dist.get_world_size()
         global_rank = dist.get_rank()
@@ -179,6 +184,36 @@ def build_dataset(is_train, config):
         root = os.path.join(config.DATA.DATA_PATH, prefix)
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 9
+    elif config.DATA.DATASET == "nabird":
+        if config.DATA.ZIP_MODE:
+            raise NotImplementedError("We do not support zipped nabird")
+        if config.HIERARCHICAL:
+            raise NotImplementedError("We do not support hierarchical nabird")
+
+        prefix = "train" if is_train else "val"
+        root = os.path.join(config.DATA.DATA_PATH, prefix)
+        dataset = datasets.ImageFolder(root, transform=transform)
+        nb_classes = 555
+    elif config.DATA.DATASET == "ip102":
+        if config.DATA.ZIP_MODE:
+            raise NotImplementedError("We do not support zipped nabird")
+        if config.HIERARCHICAL:
+            raise NotImplementedError("We do not support hierarchical nabird")
+
+        prefix = "train" if is_train else "val"
+        root = os.path.join(config.DATA.DATA_PATH, prefix)
+        dataset = datasets.ImageFolder(root, transform=transform)
+        nb_classes = 102
+    elif config.DATA.DATASET == "stanford_dogs":
+        if config.DATA.ZIP_MODE:
+            raise NotImplementedError("We do not support zipped nabird")
+        if config.HIERARCHICAL:
+            raise NotImplementedError("We do not support hierarchical nabird")
+
+        prefix = "train" if is_train else "val"
+        root = os.path.join(config.DATA.DATA_PATH, prefix)
+        dataset = datasets.ImageFolder(root, transform=transform)
+        nb_classes = 120
     else:
         raise NotImplementedError(f"We do not support dataset '{config.DATA.DATASET}'.")
 
