@@ -76,7 +76,7 @@ def map_linear_head(state_dict, *, map_path, pt_head: str, c_head: str):
     state_dict[f"{c_head}.bias"] = state_dict[f"{pt_head}.bias"][map_indices]
 
 
-def handle_linear_head(config, model, state_dict, logger) -> set[str]:
+def handle_linear_head(config, model, state_dict, logger, *, strict=False) -> set[str]:
     """
     Check classifier, if not match, then re-init classifier to zero
     Ways it could not match:
@@ -93,6 +93,8 @@ def handle_linear_head(config, model, state_dict, logger) -> set[str]:
 
     4. Both have a hierarchical head with different number of tiers/classes.
        We always reinitialize the hierarchical head.
+
+    If strict is True, then raise an error if we re-initialize ANY weights.
     """
 
     pretrained_hierarchical = _hierarchical_bias_k(0) in state_dict
@@ -118,6 +120,9 @@ def handle_linear_head(config, model, state_dict, logger) -> set[str]:
                 c_head="head",
             )
         else:
+            if strict:
+                raise RuntimeError("Number of classes don't match!")
+
             del state_dict["head.weight"]
             del state_dict["head.bias"]
             # Re-inits the linear layer
@@ -126,7 +131,7 @@ def handle_linear_head(config, model, state_dict, logger) -> set[str]:
             logger.warning(
                 "Error in loading classifier head, randomly re-init classifier head."
             )
-            okay_missing_keys.update(['head.bias', 'head.weight'])
+            okay_missing_keys.update(["head.bias", "head.weight"])
     elif pretrained_hierarchical and not current_hierarchical:
         assert (
             "head.bias" not in state_dict
@@ -159,12 +164,15 @@ def handle_linear_head(config, model, state_dict, logger) -> set[str]:
                 c_head="head",
             )
         else:
+            if strict:
+                raise RuntimeError("Number of classes don't match!")
+
             okay_missing_keys = {"head.bias", "head.weight"}
             logger.warning(
                 "Error in loading classifier head, using default initialization."
             )
 
-        for i in range(max_level):
+        for i in range(max_level + 1):
             del state_dict[_hierarchical_weight_k(i)]
             del state_dict[_hierarchical_bias_k(i)]
 
@@ -174,6 +182,9 @@ def handle_linear_head(config, model, state_dict, logger) -> set[str]:
         assert not hasattr(
             model.head, "bias"
         ), "Should not have a single random linear head"
+
+        if strict:
+            raise RuntimeError("Number of classes don't match!")
 
         # Delete the head.bias and head.weight keys then do nothing since the linear
         # layer is already correctly initialized from scratch so it can fine-tune.
@@ -220,6 +231,9 @@ def handle_linear_head(config, model, state_dict, logger) -> set[str]:
 
         if not matches:
             # UNTESTED
+            if strict:
+                raise RuntimeError("Number of classes don't match!")
+
             logger.warning(
                 "Not using pre-trained hierarchical head because the shapes do not match."
             )
