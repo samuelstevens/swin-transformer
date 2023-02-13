@@ -323,7 +323,6 @@ class BasicLayer(nn.Module):
         downsample=None,
         use_checkpoint=False,
     ):
-
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution

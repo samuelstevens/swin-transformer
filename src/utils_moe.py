@@ -14,7 +14,7 @@ import torch.distributed as dist
 def split_moe_model_state_dict(moe_keys, model_state_dict):
     moe_model_state_dict = {}
     non_moe_model_state_dict = {}
-    for (k, v) in model_state_dict.items():
+    for k, v in model_state_dict.items():
         if k in moe_keys:
             moe_model_state_dict[k] = v
         else:
