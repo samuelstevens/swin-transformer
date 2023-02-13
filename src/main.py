@@ -274,7 +274,7 @@ def main(config):
         # Resuming training on this dataset.
         checkpoint = load_model_checkpoint(checkpoint_file, model_without_ddp, logger)
 
-        logger.warn(checkpoint.msg)
+        logger.warning(checkpoint.state_dict_msg)
 
         max_accuracy = checkpoint.max_accuracy
 
@@ -292,7 +292,7 @@ def main(config):
         config, dataloader_val, model, config.TRAIN.START_EPOCH - 1, logger
     )
     logger.info(
-        "[acc1: %.1f, acc5: %.1f, loss: %.3f, test images: %d, prev acc1: %.1f]",
+        "[acc1: %.1f, acc5: %.1f, loss: %.3f, val images: %d, prev acc1: %.1f]",
         acc1,
         acc5,
         loss,
@@ -353,7 +353,7 @@ def main(config):
 
         acc1, acc5, loss = validate(config, dataloader_val, model, epoch, logger)
         logger.info(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%"
+            f"Accuracy of the network on the {len(dataset_val)} val images: {acc1:.1f}%"
         )
         max_accuracy = max(max_accuracy, acc1)
         logger.info(f"Max accuracy: {max_accuracy:.2f}%")
