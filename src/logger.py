@@ -51,11 +51,13 @@ def create_logger(output_dir, dist_rank=0, name=""):
 
 
 class WandbWriter:
+    enabled = True
+
     def __init__(self, rank):
         self.rank = rank
 
     def init(self, config):
-        if self.rank != 0:
+        if self.rank != 0 or not self.enabled:
             return
 
         kwargs = dict(
@@ -91,14 +93,14 @@ class WandbWriter:
         wandb.define_metric("memory_mb", summary="max")
 
     def log(self, dct):
-        if self.rank != 0:
+        if self.rank != 0 or not self.enabled:
             return
 
         wandb.log(dct)
 
     @property
     def name(self):
-        if self.rank != 0:
+        if self.rank != 0 or not self.enabled:
             raise RuntimeError(f"Should not get .name with rank {self.rank}.")
 
         return wandb.run.name
