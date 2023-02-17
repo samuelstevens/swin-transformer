@@ -1,0 +1,27 @@
+DATA:
+  DATASET: nabird
+  IMG_SIZE: 192
+  NUM_WORKERS: 32
+MODEL:
+  TYPE: swinv2
+  NAME: swinv2_base_window12
+  DROP_PATH_RATE: 0.2
+  SWINV2:
+    EMBED_DIM: 128
+    DEPTHS: [ 2, 2, 18, 2 ]
+    NUM_HEADS: [ 4, 8, 16, 32 ]
+    WINDOW_SIZE: 12
+TRAIN:
+  GLOBAL_BATCH_SIZE: 1024
+
+  EPOCHS: 50
+  WARMUP_EPOCHS: 2
+  WEIGHT_DECAY: 0.1
+
+  WARMUP_LR: 3e-7
+  BASE_LR: 3e-4
+  MIN_LR: 3e-4
+
+EXPERIMENT:
+  NAME: red-chili-3e-4
+  WANDB_ID: 2mzf5xqt

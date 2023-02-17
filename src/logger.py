@@ -15,7 +15,6 @@ from termcolor import colored
 import wandb
 
 
-@functools.lru_cache()
 def create_logger(output_dir, dist_rank=0, name=""):
     # create logger
     logger = logging.getLogger(name)
@@ -51,13 +50,11 @@ def create_logger(output_dir, dist_rank=0, name=""):
 
 
 class WandbWriter:
-    enabled = True
-
-    def __init__(self, rank):
-        self.rank = rank
+    def __init__(self, enabled):
+        self.enabled = enabled
 
     def init(self, config):
-        if self.rank != 0 or not self.enabled:
+        if not self.enabled:
             return
 
         kwargs = dict(
@@ -93,20 +90,21 @@ class WandbWriter:
         wandb.define_metric("memory_mb", summary="max")
 
     def log(self, dct):
-        if self.rank != 0 or not self.enabled:
+        if not self.enabled:
             return
 
         wandb.log(dct)
 
     @property
     def name(self):
-        if self.rank != 0 or not self.enabled:
-            raise RuntimeError(f"Should not get .name with rank {self.rank}.")
+        if not self.enabled:
+            raise RuntimeError(f"Should not get .name on non-master process.")
 
         return wandb.run.name
 
 
 #############################  Added below sript to incorporate generation of .yaml file #################################
+
 
 def init(name: str, verbose: bool = False, date=True) -> logging.Logger:
     if date:

@@ -7,17 +7,20 @@
 
 import dataclasses
 import os
+import pickle
+import random
+from copy import deepcopy
+from math import exp, fsum
+from typing import Any, Dict, Iterator, List, Mapping, Tuple
 
+import numpy as np
 import torch
 import torch.distributed as dist
+from nltk.tree import Tree
 from torch._six import inf
 
-import pickle
-import lzma
-import numpy as np
-from math import exp, fsum
-from nltk.tree import Tree
-from copy import deepcopy
+from . import config
+
 
 @dataclasses.dataclass(frozen=True)
 class ModelCheckpoint:
@@ -45,22 +48,29 @@ def load_model_checkpoint(checkpoint_file, model, logger) -> ModelCheckpoint:
     return ModelCheckpoint(max_accuracy, checkpoint["epoch"] + 1, msg)
 
 
-def load_training_checkpoint(
-    checkpoint_file, optimizer, lr_scheduler, loss_scaler, logger
-) -> None:
-    logger.info("Loading training checkpoint. [path: %s]", checkpoint_file)
+def load_optimizer_checkpoint(checkpoint_file, optimizer) -> None:
     checkpoint = torch.load(checkpoint_file, map_location="cpu")
 
     optimizer.load_state_dict(checkpoint["optimizer"])
+
+    del checkpoint
+    torch.cuda.empty_cache()
+
+
+def load_lr_scheduler_checkpoint(checkpoint_file, lr_scheduler) -> None:
+    checkpoint = torch.load(checkpoint_file, map_location="cpu")
+
     lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+
+    del checkpoint
+    torch.cuda.empty_cache()
+
+
+def load_loss_scaler_checkpoint(checkpoint_file, loss_scaler) -> None:
+    checkpoint = torch.load(checkpoint_file, map_location="cpu")
+
     if "scaler" in checkpoint:
         loss_scaler.load_state_dict(checkpoint["scaler"])
-
-    logger.info(
-        "Loaded training checkpoint. [path: %s, epoch: %d]",
-        checkpoint_file,
-        checkpoint["epoch"],
-    )
 
     del checkpoint
     torch.cuda.empty_cache()
@@ -489,13 +499,18 @@ class NativeScalerWithGradNormCount:
         self._scaler.load_state_dict(state_dict)
 
 
-############################### Added below script to generate .yaml files  ###########################
+# Added below script to generate .yaml files
 
-
-from typing import Any, Dict, Iterator, List, Mapping, Tuple
-from . import config
 
 def files_with_extension(paths: List[str], ext: str) -> Iterator[str]:
+    """
+    Recursively find files in paths with ext as the extension.
+
+    Arguments:
+        paths: list of filepaths to search
+        ext: file extension. Can end with . or not.
+    """
+
     # add . to ext if it doesn't have it.
     ext = "." + ext if ext[0] != "." else ext
 
@@ -508,12 +523,12 @@ def files_with_extension(paths: List[str], ext: str) -> Iterator[str]:
         for dirpath, _, filenames in os.walk(path):
             for filename in filenames:
                 if filename.endswith(ext):
-                    yield os.path.join(dirpath, filename) 
+                    yield os.path.join(dirpath, filename)
+
 
 def _flatten_dict_of_lists(
-    dict_of_lists: Mapping[object, List[object]],
-) -> Iterator[Dict[object, object]]:
-
+    dict_of_lists: dict[object, list[object]],
+) -> Iterator[dict[object, object]]:
     assert isinstance(dict_of_lists, dict)
 
     if not dict_of_lists:
@@ -529,9 +544,10 @@ def _flatten_dict_of_lists(
             yield {**flattened_dict, field: value}
     dict_of_lists[field] = value_list
 
+
 def flattened(obj: object) -> Iterator[Any]:
     """
-    Given a list, dictionary, or other value, yields an iterator of dictionaries/other values with no lists anywhere inside the structure.
+    Given a list, dictionary, or other value, returns an iterator of dictionaries/other values with no lists anywhere inside the structure.
     """
     if not isinstance(obj, dict) and not isinstance(obj, list):
         yield obj
@@ -543,18 +559,19 @@ def flattened(obj: object) -> Iterator[Any]:
         return
 
     assert isinstance(obj, dict)
-    
+
     if not obj:
         yield obj
         return
+
     flat_list = {field: list(flattened(value)) for field, value in obj.items()}
     yield from _flatten_dict_of_lists(flat_list)
 
 
-def find_experiments(paths): # -> Iterator[config.ExperimentConfig]:
+def find_experiments(paths: list[str]) -> Iterator[str]:
     """
     Arguments:
-    * args (list[str]): list of strings that are either directories containing files or config files themselves.
+    * args: list of strings that are either directories containing files or config files themselves.
     """
     if not isinstance(paths, list):
         paths = [paths]
@@ -563,14 +580,15 @@ def find_experiments(paths): # -> Iterator[config.ExperimentConfig]:
         yield config_file
 
 
-
 # Added to incorporate the new all-level hierarchical loss (paper: makes better mistakes)
+
 
 def get_label(node):
     if isinstance(node, Tree):
         return node.label()
     else:
         return node
+
 
 def load_hierarchy(dataset, data_dir):
     """
@@ -594,6 +612,7 @@ def load_hierarchy(dataset, data_dir):
 
     with open(fname, "rb") as f:
         return pickle.load(f)
+
 
 def get_uniform_weighting(hierarchy: Tree, value):
     """
@@ -670,3 +689,8 @@ def get_weighting(hierarchy: Tree, weighting, value):
         raise NotImplementedError("Weighting {} is not implemented".format(weighting))
 
 
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)

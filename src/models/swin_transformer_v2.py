@@ -31,6 +31,50 @@ class HierarchicalHead(nn.Module):
         return [head(x) for head in self.heads]
 
 
+class LinearProbe(nn.Module):
+    def __init__(self, backbone, layers, num_classes):
+        """
+        Wraps a SwinTransformerV2 with a linear probe.
+
+        Can use one or more layers in the probe.
+
+        Arguments:
+            backbone (SwinTransformerV2): SwinTransformerV2 model to probe.
+            layers (sequence of int): layer indices to probe.
+            num_classes (int): number of classes to predict from.
+        """
+        super().__init__()
+
+        assert isinstance(backbone, SwinTransformerV2)
+        assert isinstance(num_classes, int)
+
+        self.backbone = backbone
+        self.layers = tuple(layers)
+        self.num_classes = num_classes
+        self.linear_layer = torch.nn.LazyLinear(out_features=self.num_classes)
+
+        # Freeze the backbone
+        self.backbone.requires_grad_(False)
+
+    def forward(self, x):
+        """
+        We don't really know how big the linear layer will be until we do a forward pass.
+        """
+        features, activations = self.backbone.forward_features(
+            x, output_activations=True
+        )
+
+        # Assemble features into a single vector
+        features = [torch.flatten(features, start_dim=1)]
+        for layer in self.layers:
+            features.append(torch.flatten(activations[layer], start_dim=1))
+        features = torch.cat(features, dim=1)  # B N
+
+        logits = self.linear_layer(features)  # B C
+
+        return logits
+
+
 class Mlp(nn.Module):
     def __init__(
         self,
@@ -806,19 +850,29 @@ class SwinTransformerV2(nn.Module):
     def no_weight_decay_keywords(self):
         return {"cpb_mlp", "logit_scale", "relative_position_bias_table"}
 
-    def forward_features(self, x):
+    def forward_features(self, x, output_activations=False):
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
+        activations = None
+        if output_activations:
+            activations = []
+
         for layer in self.layers:
             x = layer(x)
+            if output_activations:
+                activations.append(x)
 
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose(1, 2))  # B C 1
-        x = torch.flatten(x, 1)
-        return x
+        x = torch.flatten(x, 1)  # B num_features
+
+        if output_activations:
+            return x, activations
+        else:
+            return x
 
     def forward(self, x):
         x = self.forward_features(x)

@@ -1,15 +1,15 @@
-# --------------------------------------------------------
-# Swin Transformer
-# Copyright (c) 2021 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
-# Written by Ze Liu
-# --------------------------------------------------------
+"""
+Script to tune a linear probe over a pre-trained Swin transformer. 
+
+Main differences to main.py:
+1. Uses a simpler training loop.
+2. Removes code that I think is dead.
+"""
 
 import argparse
 import datetime
 import json
 import os
-import random
 import time
 
 import numpy as np
@@ -18,30 +18,37 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 from timm.utils import AverageMeter
 
-from . import data, utils
+from . import data, models, utils
 from .config import get_config
 from .hierarchical import FineGrainedCrossEntropyLoss, accuracy
 from .logger import WandbWriter, create_logger
-from .loss_criterion import (
-    build_loss_criterion,
-    build_loss_criterion_hot_ice,
-    build_loss_criterion_red_chilli,
-)
+from .loss_criterion import build_loss_criterion
 from .lr_scheduler import build_scheduler
-from .models import build_model
 from .optimizer import build_optimizer
 from .utils import (
-    NativeScalerWithGradNormCount,
     auto_resume_helper,
     batch_size_of,
     find_experiments,
-    get_weighting,
-    load_hierarchy,
-    load_model_checkpoint,
-    load_pretrained,
     reduce_tensor,
     save_checkpoint,
 )
+
+is_ddp = int(os.environ.get("RANK", -1)) != -1
+
+if is_ddp:
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    seed_offset = dist.get_rank()
+    is_master_process = dist.get_rank() == 0
+else:
+    # We are not in a distributed process.
+    rank = 0
+    world_size = 1
+    seed_offset = 0
+    is_master_process = True
+
+
+cudnn.benchmark = True
 
 
 def make_parser():
@@ -50,17 +57,9 @@ def make_parser():
     )
     parser.add_argument(
         "--cfg",
-        nargs="+",
         type=str,
         required=True,
-        # metavar="FILE",
         help="path to config file",
-    )
-    parser.add_argument(
-        "--opts",
-        help="Modify config options by adding 'KEY VALUE' pairs. ",
-        default=None,
-        nargs="+",
     )
 
     # easy config modification
@@ -144,7 +143,6 @@ def make_parser():
     return parser
 
 
-# specifically for low regime downstream task
 class EarlyStopper:
     def __init__(self, patience=1, min_delta=0):
         self.patience = patience
@@ -170,7 +168,7 @@ def parse_options(parser):
 
 
 def scale_lr(config):
-    # Linearly scale the learning rate according to total batch size. May not be optimal
+    # Linearly scale the learning rate according to total batch size. May not be optimal.
     scaling_factor = (
         config.TRAIN.DEVICE_BATCH_SIZE
         * dist.get_world_size()
@@ -186,21 +184,21 @@ def scale_lr(config):
 
 
 def fix_batch_size(config):
-    if "WORLD_SIZE" not in os.environ:
-        # Not distributed
+    if not is_ddp:
         return
 
     def divide_cleanly(a, b):
         assert a % b == 0, f"{a} / {b} has remainder {a % b}"
         return a // b
 
-    n_procs = int(os.environ["WORLD_SIZE"])
-    desired_device_batch_size = divide_cleanly(config.TRAIN.GLOBAL_BATCH_SIZE, n_procs)
+    desired_device_batch_size = divide_cleanly(
+        config.TRAIN.GLOBAL_BATCH_SIZE, world_size
+    )
     actual_device_batch_size = config.TRAIN.DEVICE_BATCH_SIZE
 
     if actual_device_batch_size > desired_device_batch_size:
         print(
-            f"Decreasing device batch size from {actual_device_batch_size} to {desired_device_batch_size} so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not                {desired_device_batch_size * n_procs}!"
+            f"Decreasing device batch size from {actual_device_batch_size} to {desired_device_batch_size} so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {desired_device_batch_size * world_size}!"
         )
         config.TRAIN.ACCUMULATION_STEPS = 1
         config.TRAIN.DEVICE_BATCH_SIZE = desired_device_batch_size
@@ -212,28 +210,32 @@ def fix_batch_size(config):
             desired_device_batch_size, actual_device_batch_size
         )
         print(
-            f"Using {config.TRAIN.ACCUMULATION_STEPS} accumulation steps so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {actual_device_batch_size * n_procs}!"
+            f"Using {config.TRAIN.ACCUMULATION_STEPS} accumulation steps so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {actual_device_batch_size * world_size}!"
         )
 
 
-def main(config, flag):
-    wandb_writer.init(config)
-
+def main(config):
+    # Need to fix some stuff in the config
     config.defrost()
 
+    # Fix batch size based on desired global batch size and maximum device batch size.
     fix_batch_size(config)
-    scale_lr(config)
+    # Linearly scale learning rate.
+    # TODO: scale learning rate for Adam with square root factor.
+    # scale_lr(config)
 
     config.freeze()
+
+    wandb_writer.init(config)
 
     # Logger initialization
     os.makedirs(config.OUTPUT, exist_ok=True)
     logger = create_logger(
         output_dir=config.OUTPUT,
-        dist_rank=dist.get_rank(),
+        dist_rank=rank,
         name=config.EXPERIMENT.NAME,
     )
-    if dist.get_rank() == 0:
+    if is_master_process:
         path = os.path.join(config.OUTPUT, "config.yaml")
         with open(path, "w") as f:
             f.write(config.dump())
@@ -242,16 +244,13 @@ def main(config, flag):
     logger.info(config.dump())
     logger.info(json.dumps(vars(args)))
 
-    dataset_val, dataloader_val = data.build_val_dataloader(config, True)
+    dataset_val, dataloader_val = data.build_val_dataloader(config, is_ddp)
+    dataset_train, dataloader_train = data.build_train_dataloader(config, is_ddp)
+    mixup_fn = data.build_aug_fn(config)
 
     logger.info(f"Creating model: {config.MODEL.TYPE}/{config.MODEL.NAME}")
-    model = build_model(config)
-    logger.info(str(model))
+    model = models.build_linear_probe(config)
 
-    print("config.TRAIN.LOSS", config.TRAIN.LOSS)
-
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"number of params: {n_parameters}")
     if hasattr(model, "flops"):
         flops = model.flops()
         logger.info(f"number of GFLOPs: {flops / 1e9}")
@@ -259,16 +258,26 @@ def main(config, flag):
     model.cuda()
     model_without_ddp = model
 
+    # Just need a single forward pass to initialize the lazy modules before
+    # we initialize the optimizers (which need a reference to all parameters).
+    with torch.no_grad():
+        inputs, targets = next(iter(dataloader_train))
+        inputs = inputs.cuda(non_blocking=True)
+        model.forward(inputs)
+
     optimizer = build_optimizer(config, model)
-    model = torch.nn.parallel.DistributedDataParallel(
-        model,
-        device_ids=[config.LOCAL_RANK],
-        broadcast_buffers=False,
-        find_unused_parameters=False,
-        gradient_as_bucket_view=True,
-        static_graph=True,
-    )
-    loss_scaler = NativeScalerWithGradNormCount()
+
+    if is_ddp:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[config.LOCAL_RANK],
+            broadcast_buffers=False,
+            find_unused_parameters=False,
+            gradient_as_bucket_view=True,
+            static_graph=True,
+        )
+
+    loss_scaler = torch.cuda.amp.GradScaler()
 
     max_accuracy = 0.0
 
@@ -277,9 +286,10 @@ def main(config, flag):
     if checkpoint_file:
         logger.info("Resuming. [path: %s]", checkpoint_file)
         # Resuming training on this dataset.
-        checkpoint = load_model_checkpoint(checkpoint_file, model_without_ddp, logger)
-
-        logger.warning(checkpoint.state_dict_msg)
+        checkpoint = utils.load_model_checkpoint(
+            checkpoint_file, model_without_ddp, logger
+        )
+        logger.warn(checkpoint.state_dict_msg)
 
         max_accuracy = checkpoint.max_accuracy
 
@@ -289,15 +299,17 @@ def main(config, flag):
     else:
         logger.info("No checkpoint found. [path: %s]", config.OUTPUT)
 
-    if config.MODEL.PRETRAINED:
-        # Loading from a pretrained checkpoint that might not be used on this dataset.
-        load_pretrained(config, model_without_ddp, logger)
+    if not config.MODEL.PRETRAINED:
+        raise ValueError("not using a pretrained model")
+
+    # Loading from a pretrained checkpoint that might not have trained on this dataset.
+    utils.load_pretrained(config, model_without_ddp.backbone, logger)
 
     acc1, acc5, loss = validate(
         config, dataloader_val, model, config.TRAIN.START_EPOCH - 1, logger
     )
     logger.info(
-        "[acc1: %.1f, acc5: %.1f, loss: %.3f, val images: %d, prev acc1: %.1f]",
+        "[acc1: %.1f, acc5: %.1f, loss: %.3f, test images: %d, prev acc1: %.1f]",
         acc1,
         acc5,
         loss,
@@ -308,55 +320,31 @@ def main(config, flag):
     if config.MODE == "eval":
         return
 
-    if config.THROUGHPUT_MODE:
-        throughput(dataloader_val, model, logger)
-        return
-
-    dataset_train, dataloader_train = data.build_train_dataloader(config, True)
-    mixup_fn = data.build_aug_fn(config)
-    # Added to incorporate tree-based hierarchy
-    if config.TRAIN.LOSS == "red-chilli" or "hot-ice":
-        hierarchy = load_hierarchy("inaturalist21-192", config.DATA.DATA_PATH)
-        weights = get_weighting(hierarchy, config.TRAIN.WEIGHTING, config.TRAIN.ALPHA)
-        classes = ["nat" + i.split("_", 1)[0][1:] for i in dataset_train.classes]
-
-    # For low data regieme to avoid overfitting
-    early_stopper = EarlyStopper(patience=3, min_delta=0.00001)
-
     lr_scheduler = build_scheduler(
         config, optimizer, len(dataloader_train) // config.TRAIN.ACCUMULATION_STEPS
     )
 
-    if config.TRAIN.LOSS == "fuzzy-fig" or config.TRAIN.LOSS == "groovy-grape":
-        criterion = build_loss_criterion(config)
-        logger.info("Loss function: %s", criterion)
-
-    elif config.TRAIN.LOSS == "hot-ice":  # not yet functional  (head part has t mddify)
-        criterion = build_loss_criterion_hot_ice(config, hierarchy, classes, weights)
-        logger.info("Loss function: %s", criterion)
-
-    elif config.TRAIN.LOSS == "red-chilli":
-        criterion = build_loss_criterion_red_chilli(config, hierarchy, classes, weights)
-        logger.info("Loss function: %s", criterion)
-
-    else:
-        raise ValueError(config.TRAIN.LOSS)
+    loss_fn = build_loss_criterion(config)
 
     if checkpoint_file:
-        # Resuming training on this dataset.
+        # Load all the training-related stuff.
         utils.load_optimizer_checkpoint(checkpoint_file, optimizer)
         utils.load_lr_scheduler_checkpoint(checkpoint_file, lr_scheduler)
         utils.load_loss_scaler_checkpoint(checkpoint_file, loss_scaler)
 
+    stopper = EarlyStopper(patience=5, min_delta=0.1)
+
     logger.info("Start training")
     start_time = time.time()
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
-        dataloader_train.sampler.set_epoch(epoch)
+        is_last_epoch = epoch == (config.TRAIN.EPOCHS - 1)
+        if is_ddp:
+            dataloader_train.sampler.set_epoch(epoch)
 
         train_one_epoch(
             config,
             model,
-            criterion,
+            loss_fn,
             dataloader_train,
             optimizer,
             epoch,
@@ -365,9 +353,7 @@ def main(config, flag):
             loss_scaler,
             logger,
         )
-        if dist.get_rank() == 0 and (
-            epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)
-        ):
+        if is_master_process and (epoch % config.SAVE_FREQ == 0 or is_last_epoch):
             save_checkpoint(
                 config,
                 epoch,
@@ -380,27 +366,13 @@ def main(config, flag):
             )
 
         acc1, acc5, loss = validate(config, dataloader_val, model, epoch, logger)
-        logger.info(
-            f"Accuracy of the network on the {len(dataset_val)} val images: {acc1:.1f}%"
-        )
+        logger.info(f"Top 1 acc. on {len(dataset_val)} val. examples: {acc1:.1f}%")
         max_accuracy = max(max_accuracy, acc1)
         logger.info(f"Max accuracy: {max_accuracy:.2f}%")
 
-        if config.TRAIN.DATA_PERCENTAGE < 1.0:
-            if early_stopper.early_stop(loss):
-                print("early stop")
-                break
-
-    # The file stores the final results for each config file
-    if flag == 0:
-        global fw
-        fw = open(config.OUTPUT + "_results", "w+")
-        flag = flag + 1
-
-    fw.write("The results of " + config.OUTPUT + " is ")
-    fw.write("val/acc1: ")
-    fw.write("%f" % max_accuracy)
-    fw.write("\n")
+        if stopper.early_stop(loss):
+            logger.info(f"Early stopping at epoch {epoch}.")
+            break
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -422,11 +394,12 @@ def train_one_epoch(
     model.train()
     optimizer.zero_grad()
 
+    grad_norm = None
+
     num_steps = len(dataloader)
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
     norm_meter = AverageMeter()
-    scaler_meter = AverageMeter()
 
     start = time.time()
     end = time.time()
@@ -434,74 +407,33 @@ def train_one_epoch(
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
 
-        if (
-            config.TRAIN.LOSS == "fuzzy-fig" or config.TRAIN.LOSS == "groovy-grape"
-        ):  # have to make the ""HIERARCHICAL: false" is the yaml file for fuzzy-fig
-            if mixup_fn is not None:
-                samples, targets = mixup_fn(samples, targets)
+        if mixup_fn is not None:
+            samples, targets = mixup_fn(samples, targets)
 
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                outputs = model(samples)
+        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+            outputs = model(samples)
 
-        elif config.TRAIN.LOSS == "hot-ice":
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                outputs = model(samples)  # .type(torch.float32)
-
-        elif config.TRAIN.LOSS == "red-chilli":
-            # reverse the target columns
-            targets = torch.cat(
-                (
-                    torch.index_select(
-                        targets, 1, torch.LongTensor([6, 5, 4, 3]).cuda()
-                    ),
-                    torch.index_select(targets, 1, torch.LongTensor([2, 1, 0]).cuda()),
-                ),
-                dim=1,
-            )
-
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                outputs = model(samples)
-                outputs = [
-                    outputs[i].type(torch.float32)
-                    for i in range(len(outputs) - 1, -1, -1)
-                ]
-        breakpoint()
-        outputs = outputs[-1].float()
-        targets = targets[:, -1]
         loss = criterion(outputs, targets)
-        loss = loss / config.TRAIN.ACCUMULATION_STEPS
 
-        # this attribute is added by timm on one optimizer (adahessian)
-        is_second_order = (
-            hasattr(optimizer, "is_second_order") and optimizer.is_second_order
-        )
-        grad_norm = loss_scaler(
-            loss,
-            optimizer,
-            clip_grad=config.TRAIN.CLIP_GRAD,
-            parameters=model.parameters(),
-            create_graph=is_second_order,
-            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0,
-        )
+        loss_scaler.scale(loss).backward()
+        loss_scaler.unscale_(optimizer)
+        if config.TRAIN.CLIP_GRAD:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), config.TRAIN.CLIP_GRAD
+            )
+        loss_scaler.step(optimizer)
+        loss_scaler.update()
+
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
             optimizer.zero_grad()
-            if lr_scheduler is not None:
-                lr_scheduler.step_update(
-                    (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS
-                )
-        loss_scale_value = loss_scaler.state_dict()["scale"]
+            lr_scheduler.step_update(
+                (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS
+            )
 
-        torch.cuda.synchronize()
-
-        # We divide by accumulation steps (not sure why) but it makes
-        # the logged values look weird. So I multiply by it to fix that.
-        loss_meter.update(
-            loss.item() * config.TRAIN.ACCUMULATION_STEPS, batch_size_of(targets)
-        )
+        loss_meter.update(loss.item(), batch_size_of(targets))
 
         if grad_norm is not None:  # loss_scaler return None if not update
             norm_meter.update(grad_norm)
-        scaler_meter.update(loss_scale_value)
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -512,28 +444,22 @@ def train_one_epoch(
             etas = batch_time.avg * (num_steps - idx)
             logger.info(
                 f"Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t"
-                f"eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t"
+                f"eta {datetime.timedelta(seconds=int(etas))}\t"
+                f"lr {lr:.6f}\t"
                 f"wd {wd:.4f}\t"
                 f"time {batch_time.val:.4f} ({batch_time.avg:.4f})\t"
                 f"loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t"
                 f"grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t"
-                f"loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t"
                 f"mem {memory_used:.0f}MB"
             )
             stats = {
                 "train/batch_time": batch_time.val,
                 "train/batch_loss": loss_meter.val,
                 "train/grad_norm": norm_meter.val,
-                "train/loss_scale": scaler_meter.val,
+                "train/weight_decay": wd,
+                "train/learning_rate": lr,
                 "memory_mb": memory_used,
-                "train/learning_rate": config.TRAIN.BASE_LR,
             }
-            if lr_scheduler is not None:
-                stats["train/learning_rate"] = lr_scheduler.get_update_values(
-                    # Copied from line 326
-                    (epoch * num_steps + idx)
-                    // config.TRAIN.ACCUMULATION_STEPS
-                )[0]
 
             wandb_writer.log(
                 {**stats, "step": epoch * num_steps + idx, "epoch": epoch, "batch": idx}
@@ -574,9 +500,10 @@ def validate(config, dataloader, model, epoch, logger):
         loss = criterion(output, target)
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
-        acc1 = reduce_tensor(acc1)
-        acc5 = reduce_tensor(acc5)
-        loss = reduce_tensor(loss)
+        if is_ddp:
+            acc1 = reduce_tensor(acc1)
+            acc5 = reduce_tensor(acc5)
+            loss = reduce_tensor(loss)
 
         loss_meter.update(loss.item(), target.size(0))
         acc1_meter.update(acc1.item(), target.size(0))
@@ -609,63 +536,23 @@ def validate(config, dataloader, model, epoch, logger):
     return acc1_meter.avg, acc5_meter.avg, loss_meter.avg
 
 
-@torch.no_grad()
-def throughput(dataloader, model, logger):
-    model.eval()
-
-    for idx, (images, _) in enumerate(dataloader):
-        images = images.cuda(non_blocking=True)
-        batch_size = images.shape[0]
-        for _ in range(50):
-            model(images)
-        torch.cuda.synchronize()
-        logger.info("throughput averaged with 30 times")
-        tic1 = time.time()
-        for _ in range(30):
-            model(images)
-        torch.cuda.synchronize()
-        tic2 = time.time()
-        logger.info(
-            f"batch_size {batch_size} throughput {30 * batch_size / (tic2 - tic1)}"
-        )
-        return
-
-
 if __name__ == "__main__":
     parser = make_parser()
     args = parse_options(parser)
 
-    # Initialize the distributed process.
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        print(f"RANK and WORLD_SIZE in environ: {rank}/{world_size}")
-    else:
-        # We are not in a distributed process.
-        rank = -1
-        world_size = -1
+    if is_ddp:
+        # Initialize the distributed process.
+        torch.distributed.init_process_group(
+            backend="nccl", init_method="env://", world_size=world_size, rank=rank
+        )
+        torch.distributed.barrier()
 
-    cudnn.benchmark = True
+    config = get_config(args)
+    torch.cuda.set_device(rank)
 
-    torch.distributed.init_process_group(
-        backend="nccl", init_method="env://", world_size=world_size, rank=rank
-    )
-    torch.distributed.barrier()
+    # Set seed appropriately.
+    seed = config.SEED + seed_offset
+    utils.set_seed(seed)
 
-    # Required to generate output file only once when in one go multiple
-    # .yaml files run one by one
-    flag = -1
-    for experiment_config in find_experiments(args.cfg):
-        args.cfg = experiment_config
-        config = get_config(args)
-        flag += 1
-
-        torch.cuda.set_device(config.LOCAL_RANK)
-
-        # Set seed appropriately.
-        seed = config.SEED + dist.get_rank()
-        utils.set_seed(seed)
-
-        wandb_writer = WandbWriter(rank=dist.get_rank())
-
-        main(config, flag)
+    wandb_writer = WandbWriter(is_master_process)
+    main(config)
