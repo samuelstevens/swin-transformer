@@ -42,22 +42,26 @@ except ImportError:
     from timm.data.transforms import _pil_interp
 
 
-def build_loader(config):
+def build_val_dataloader(config, is_ddp):
     config.defrost()
-    dataset_val, config.MODEL.NUM_CLASSES = build_dataset(is_train=False, config=config)
+    dataset, config.MODEL.NUM_CLASSES = build_dataset(is_train=False, config=config)
     config.freeze()
-    print(f"Rank {config.LOCAL_RANK}/{dist.get_rank()} built val dataset.")
 
     if config.TEST.SEQUENTIAL:
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    else:
-        sampler_val = torch.utils.data.distributed.DistributedSampler(
-            dataset_val, shuffle=config.TEST.SHUFFLE
+        sampler = torch.utils.data.SequentialSampler(dataset)
+    elif is_ddp:
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            shuffle=config.TEST.SHUFFLE,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
         )
+    else:
+        sampler = torch.utils.data.RandomSampler(dataset, replacement=False)
 
-    dataloader_val = torch.utils.data.DataLoader(
-        dataset_val,
-        sampler=sampler_val,
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        sampler=sampler,
         batch_size=config.TRAIN.DEVICE_BATCH_SIZE,
         shuffle=False,
         num_workers=config.DATA.NUM_WORKERS,
@@ -65,72 +69,72 @@ def build_loader(config):
         drop_last=False,
     )
 
-    # Make these guys into lists so they have a __len__
-    dataset_train = []
-    dataloader_train = []
+    return dataset, dataloader
 
+
+def build_train_dataloader(config, is_ddp):
+    config.defrost()
+    dataset, config.MODEL.NUM_CLASSES = build_dataset(is_train=True, config=config)
+    config.freeze()
+
+    # Check if we are overfitting some subset of the training data for debugging
+    if config.TRAIN.OVERFIT_BATCHES > 0:
+        n_examples = config.TRAIN.OVERFIT_BATCHES * config.TRAIN.DEVICE_BATCH_SIZE
+        indices = random.sample(range(len(dataset)), n_examples)
+        dataset = Subset(dataset, indices)
+
+    # Check if training is for low data regime; select subset of data (script added)
+    if config.TRAIN.DATA_PERCENTAGE < 1:
+        n_examples = int(config.TRAIN.DATA_PERCENTAGE * len(dataset))
+        indices = random.sample(range(len(dataset)), n_examples)
+        dataset = Subset(dataset, indices)
+
+    if is_ddp:
+        sampler_train = torch.utils.data.DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=True,
+        )
+    else:
+        sampler_train = torch.utils.data.RandomSampler(dataset, replacement=False)
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        sampler=sampler_train,
+        batch_size=config.TRAIN.DEVICE_BATCH_SIZE,
+        num_workers=config.DATA.NUM_WORKERS,
+        pin_memory=config.DATA.PIN_MEMORY,
+        drop_last=True,
+    )
+
+    return dataset, dataloader
+
+
+def build_aug_fn(config):
     mixup_fn = None
-
-    if config.MODE in ("train", "tune"):
-        dataset_train, _ = build_dataset(is_train=True, config=config)
-        print(f"Rank {config.LOCAL_RANK}/{dist.get_rank()} built train dataset.")
-
-        # Check if we are overfitting some subset of the training data for debugging
-        if config.TRAIN.OVERFIT_BATCHES > 0:
-            n_examples = config.TRAIN.OVERFIT_BATCHES * config.TRAIN.DEVICE_BATCH_SIZE
-            indices = random.sample(range(len(dataset_train)), n_examples)
-            dataset_train = Subset(dataset_train, indices)
-        # Check if training is for low data regieme; select subset of data (script added)
-        if config.TRAIN.DATA_PERCENTAGE < 1:
-            n_examples = config.TRAIN.DATA_PERCENTAGE * len(dataset_train) 
-            indices = random.sample(range(len(dataset_train)), int(n_examples))
-            dataset_train = Subset(dataset_train, indices)
-
-        num_tasks = dist.get_world_size()
-        global_rank = dist.get_rank()
-        if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == "part":
-            indices = np.arange(
-                dist.get_rank(), len(dataset_train), dist.get_world_size()
-            )
-            sampler_train = SubsetRandomSampler(indices)
+    mixup_active = (
+        config.AUG.MIXUP > 0
+        or config.AUG.CUTMIX > 0.0
+        or config.AUG.CUTMIX_MINMAX is not None
+    )
+    if mixup_active:
+        mixup_args = dict(
+            mixup_alpha=config.AUG.MIXUP,
+            cutmix_alpha=config.AUG.CUTMIX,
+            cutmix_minmax=config.AUG.CUTMIX_MINMAX,
+            prob=config.AUG.MIXUP_PROB,
+            switch_prob=config.AUG.MIXUP_SWITCH_PROB,
+            mode=config.AUG.MIXUP_MODE,
+            label_smoothing=config.MODEL.LABEL_SMOOTHING,
+            num_classes=config.MODEL.NUM_CLASSES,
+        )
+        if config.HIERARCHICAL:
+            mixup_fn = HierarchicalMixup(**mixup_args)
         else:
-            sampler_train = torch.utils.data.DistributedSampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
+            mixup_fn = Mixup(**mixup_args)
 
-        dataloader_train = torch.utils.data.DataLoader(
-            dataset_train,
-            sampler=sampler_train,
-            batch_size=config.TRAIN.DEVICE_BATCH_SIZE,
-            num_workers=config.DATA.NUM_WORKERS,
-            pin_memory=config.DATA.PIN_MEMORY,
-            drop_last=True,
-        )
-
-        # setup mixup / cutmix
-        mixup_fn = None
-        mixup_active = (
-            config.AUG.MIXUP > 0
-            or config.AUG.CUTMIX > 0.0
-            or config.AUG.CUTMIX_MINMAX is not None
-        )
-        if mixup_active:
-            mixup_args = dict(
-                mixup_alpha=config.AUG.MIXUP,
-                cutmix_alpha=config.AUG.CUTMIX,
-                cutmix_minmax=config.AUG.CUTMIX_MINMAX,
-                prob=config.AUG.MIXUP_PROB,
-                switch_prob=config.AUG.MIXUP_SWITCH_PROB,
-                mode=config.AUG.MIXUP_MODE,
-                label_smoothing=config.MODEL.LABEL_SMOOTHING,
-                num_classes=config.MODEL.NUM_CLASSES,
-            )
-            if config.HIERARCHICAL:
-                mixup_fn = HierarchicalMixup(**mixup_args)
-            else:
-                mixup_fn = Mixup(**mixup_args)
-
-    return dataset_train, dataset_val, dataloader_train, dataloader_val, mixup_fn
+    return mixup_fn
 
 
 def build_dataset(is_train, config):

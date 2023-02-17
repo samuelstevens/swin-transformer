@@ -142,6 +142,12 @@ _C.MODEL.SIMMIM.NORM_TARGET = CN()
 _C.MODEL.SIMMIM.NORM_TARGET.ENABLE = False
 _C.MODEL.SIMMIM.NORM_TARGET.PATCH_SIZE = 47
 
+# Linear Probe parameters
+_C.MODEL.LINEAR_PROBE = CN()
+# Use the last layer
+_C.MODEL.LINEAR_PROBE.LAYERS = [-1]
+
+
 # -----------------------------------------------------------------------------
 # Training settings
 # -----------------------------------------------------------------------------
@@ -314,8 +320,6 @@ def update_config(config, args):
     _update_config_from_file(config, args.cfg)
 
     config.defrost()
-    if args.opts:
-        config.merge_from_list(args.opts)
 
     def _check_args(name):
         if hasattr(args, name) and eval(f"args.{name}"):
@@ -384,27 +388,20 @@ def get_config(args):
     return config
 
 
-
 #################################### Added below sript to incorporate generation of .yaml file #############################################
 
-import tomli
-from . import utils
-import dataclasses
 import copy
+import dataclasses
+from typing import Any, Dict, Iterator, List, Optional, Type, TypeVar, Union
+
+import tomli
 from typing_extensions import Literal
 
-from typing import (
-    Any,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Type,
-    TypeVar,
-    Union,
-)
+from . import utils
+
 Distribution = Literal["normal", "uniform", "loguniform"]
 T = TypeVar("T", bound="Config")
+
 
 class Config:
     @classmethod
@@ -451,6 +448,7 @@ class Config:
         if getattr(self, fname) not in choices:
             raise ValueError(f"self.{fname} must be one of {', '.join(choices)}")
 
+
 @dataclasses.dataclass(frozen=True)
 class RandomVecConfig(Config):
     distribution: Optional[Distribution] = None
@@ -461,6 +459,8 @@ class RandomVecConfig(Config):
     def __post_init__(self) -> None:
         if self.distribution is not None:
             self.validate_field("distribution", Distribution)
+
+
 Layer = Union[
     int,
     Literal[
@@ -476,6 +476,7 @@ Layer = Union[
         "dropout",
     ],
 ]
+
 
 @dataclasses.dataclass(frozen=True)
 class ProjectionConfig(Config):
@@ -493,7 +494,9 @@ class ProjectionConfig(Config):
 
         return cls(**dct)
 
+
 PromptType = Literal["uuid", "token", "vocab", "chunk-n", "natural-n"]
+
 
 @dataclasses.dataclass(frozen=True)
 class DataConfig(Config):
@@ -524,6 +527,7 @@ class DataConfig(Config):
 
         with open(self.file, "r") as file:
             return file.read()
+
 
 @dataclasses.dataclass(frozen=True)
 class ModelConfig(Config):
@@ -575,7 +579,9 @@ class ModelConfig(Config):
         )
         assert isinstance(self.projection, ProjectionConfig), str(type(self.projection))
 
+
 SeedSource = Literal["trial", "config", "random"]
+
 
 @dataclasses.dataclass(frozen=True)
 class ExperimentConfig(Config):

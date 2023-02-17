@@ -5,11 +5,42 @@
 # Written by Ze Liu
 # --------------------------------------------------------
 
+from . import swin_transformer_v2
 from .simmim import build_simmim
 from .swin_mlp import SwinMLP
 from .swin_transformer import SwinTransformer
 from .swin_transformer_moe import SwinTransformerMoE
-from .swin_transformer_v2 import SwinTransformerV2
+
+
+def build_linear_probe(config):
+    if config.MODEL.TYPE == "swinv2":
+        # Copied from below
+        backbone = swin_transformer_v2.SwinTransformerV2(
+            img_size=config.DATA.IMG_SIZE,
+            patch_size=config.MODEL.SWINV2.PATCH_SIZE,
+            in_chans=config.MODEL.SWINV2.IN_CHANS,
+            embed_dim=config.MODEL.SWINV2.EMBED_DIM,
+            depths=config.MODEL.SWINV2.DEPTHS,
+            num_heads=config.MODEL.SWINV2.NUM_HEADS,
+            window_size=config.MODEL.SWINV2.WINDOW_SIZE,
+            mlp_ratio=config.MODEL.SWINV2.MLP_RATIO,
+            qkv_bias=config.MODEL.SWINV2.QKV_BIAS,
+            drop_rate=config.MODEL.DROP_RATE,
+            drop_path_rate=config.MODEL.DROP_PATH_RATE,
+            ape=config.MODEL.SWINV2.APE,
+            patch_norm=config.MODEL.SWINV2.PATCH_NORM,
+            use_checkpoint=config.TRAIN.USE_CHECKPOINT,
+            pretrained_window_sizes=config.MODEL.SWINV2.PRETRAINED_WINDOW_SIZES,
+        )
+        model = swin_transformer_v2.LinearProbe(
+            backbone=backbone,
+            layers=config.MODEL.LINEAR_PROBE.LAYERS,
+            num_classes=config.MODEL.NUM_CLASSES,
+        )
+    else:
+        raise ValueError(f"linear probe not supported for {config.MODEL.TYPE}")
+
+    return model
 
 
 def build_model(config, is_pretrain=False):
@@ -55,7 +86,7 @@ def build_model(config, is_pretrain=False):
             fused_window_process=config.FUSED_WINDOW_PROCESS,
         )
     elif model_type == "swinv2":
-        model = SwinTransformerV2(
+        model = swin_transformer_v2.SwinTransformerV2(
             img_size=config.DATA.IMG_SIZE,
             patch_size=config.MODEL.SWINV2.PATCH_SIZE,
             in_chans=config.MODEL.SWINV2.IN_CHANS,
