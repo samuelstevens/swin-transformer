@@ -18,10 +18,11 @@ TRAIN:
   WARMUP_EPOCHS: 2
   WEIGHT_DECAY: 0.1
 
-  WARMUP_LR: 1e-7
-  BASE_LR: 1e-4
-  MIN_LR: 1e-4
+  WARMUP_LR: 1e-8
+  BASE_LR: 1e-5
+  MIN_LR: 1e-5
 
 EXPERIMENT:
-  NAME: fuzzy-fig-1e-4
-  WANDB_ID: 1dg0gvix
+  NAME: red-chili-1e-5
+  WANDB_ID: jhytfdqd
+

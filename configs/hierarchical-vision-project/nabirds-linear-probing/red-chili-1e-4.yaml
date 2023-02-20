@@ -23,5 +23,5 @@ TRAIN:
   MIN_LR: 1e-4
 
 EXPERIMENT:
-  NAME: fuzzy-fig-1e-4
-  WANDB_ID: 1dg0gvix
+  NAME: red-chili-1e-4
+  WANDB_ID: 4mzf5xqt

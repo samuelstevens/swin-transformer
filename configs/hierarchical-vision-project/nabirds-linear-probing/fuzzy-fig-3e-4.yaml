@@ -25,5 +25,3 @@ TRAIN:
 EXPERIMENT:
   NAME: fuzzy-fig-3e-4
   WANDB_ID: 1zg0gvee
-
-HIERARCHICAL: false
