@@ -110,3 +110,18 @@ curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip
 unzip awscliv2.zip
 ./aws/install --bin-dir ~/.local/bin --install-dir ~/.local/aws-cli
 ```
+
+## Download Downstream Data
+
+### NA Birds
+
+Download the `.tar.gz` file from [https://dl.allaboutbirds.org/nabirds](https://dl.allaboutbirds.org/nabirds).
+```
+wget https://www.dropbox.com/s/nf78cbxq6bxpcfc/nabirds.tar.gz
+tar -xf nabirds.tar.gz
+```
+
+Run our script to generate the same stratified train/val split from the training data:
+```
+python -m src.tools.nabirds_stratified_split --input <nabirds-location> --output <output-directory> 
+```
