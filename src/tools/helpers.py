@@ -1,6 +1,22 @@
+import collections
 import logging
 import pathlib
+import statistics
 import sys
+
+
+class ClassDistribution:
+    def __init__(self, seq):
+        self.counts = collections.Counter(seq)
+
+    def min(self):
+        return self.counts.most_common()[-1]
+
+    def max(self):
+        return self.counts.most_common(1)[0]
+
+    def mean(self):
+        return statistics.mean(self.counts.values())
 
 
 def create_logger(name, output_dir: pathlib.Path):

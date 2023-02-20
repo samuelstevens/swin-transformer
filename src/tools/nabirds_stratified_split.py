@@ -3,10 +3,8 @@ Makes a stratified, possibly low-data split of NA birds using sklearn's
 model_selection.train_test_split() method. 
 """
 import argparse
-import collections
 import pathlib
 import shutil
-import statistics
 
 import sklearn.model_selection
 
@@ -114,23 +112,9 @@ def stratified_train_val_split(x, y, train_fraction: float):
     return x_train, x_val, y_train, y_val
 
 
-class ClassDistribution:
-    def __init__(self, seq):
-        self.counts = collections.Counter(seq)
-
-    def min(self):
-        return self.counts.most_common()[-1]
-
-    def max(self):
-        return self.counts.most_common(1)[0]
-
-    def mean(self):
-        return statistics.mean(self.counts.values())
-
-
 def save_data(x, y, output_dir: pathlib.Path):
     """
-    Copies the images from x into the output_dir. 
+    Copies the images from x into the output_dir.
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +147,7 @@ def main():
     input_dir = pathlib.Path(args.input)
     x, y = load_train_data(input_dir)
 
-    dist = ClassDistribution(y)
+    dist = helpers.ClassDistribution(y)
     logger.info(
         "Class distribution: [min: %s, mean: %.2f, max: %s]",
         dist.min(),
@@ -175,7 +159,7 @@ def main():
     low_data_fraction = args.low_data
     if low_data_fraction < 1:
         x, y = stratified_low_data_split(x, y, low_data_fraction)
-        dist = ClassDistribution(y)
+        dist = helpers.ClassDistribution(y)
         logger.info(
             "Class distribution after low data split: [min: %s, mean: %.2f, max: %s]",
             dist.min(),
@@ -187,8 +171,8 @@ def main():
     x_train, x_val, y_train, y_val = stratified_train_val_split(
         x, y, train_val_fraction
     )
-    dist_train = ClassDistribution(y_train)
-    dist_val = ClassDistribution(y_val)
+    dist_train = helpers.ClassDistribution(y_train)
+    dist_val = helpers.ClassDistribution(y_val)
     logger.info(
         "Train class distribution: [min: %s, mean: %.2f, max: %s]",
         dist_train.min(),

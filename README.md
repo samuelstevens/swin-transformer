@@ -125,3 +125,16 @@ Run our script to generate the same stratified train/val split from the training
 ```
 python -m src.tools.nabirds_stratified_split --input <nabirds-location> --output <output-directory> 
 ```
+
+### IP102
+
+You can use rclone to download it directly from Google Drive.
+Otherwise check the Github: [https://github.com/xpwu95/IP102](https://github.com/xpwu95/IP102)
+```
+rclone copy gdrive:IP102_v1.1/Classification <local-directory> --drive-shared-with-me
+```
+
+Move the data:
+```
+python -m src.tools.ip102_preprocess --input <input-directory> --output <output-directory>
+```
