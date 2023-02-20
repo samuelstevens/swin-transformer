@@ -1,5 +1,4 @@
 import einops
-import numpy as np
 import torch
 from nltk.tree import Tree
 

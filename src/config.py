@@ -390,14 +390,10 @@ def get_config(args):
 
 #################################### Added below sript to incorporate generation of .yaml file #############################################
 
-import copy
 import dataclasses
-from typing import Any, Dict, Iterator, List, Optional, Type, TypeVar, Union
+from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
-import tomli
 from typing_extensions import Literal
-
-from . import utils
 
 Distribution = Literal["normal", "uniform", "loguniform"]
 T = TypeVar("T", bound="Config")

@@ -7,7 +7,6 @@ import pickle
 
 import hypothesis
 import hypothesis.extra.numpy
-import numpy as np
 import torch
 from nltk.tree import Tree
 
@@ -98,9 +97,7 @@ def test_mbm_smoke():
     weights = utils.get_uniform_weighting(hierarchy, 0.1)
     classes = hierarchy.leaves()
 
-    hierarchical_nll_mbm = hierarchical.HierarchicalNLLLossMBM(
-        hierarchy, classes, weights
-    )
+    hierarchical.HierarchicalNLLLossMBM(hierarchy, classes, weights)
 
 
 def test_mbm_smoke_complex():
@@ -108,9 +105,7 @@ def test_mbm_smoke_complex():
     weights = utils.get_uniform_weighting(hierarchy, 0.1)
     classes = hierarchy.leaves()
 
-    hierarchical_nll_mbm = hierarchical.HierarchicalNLLLossMBM(
-        hierarchy, classes, weights
-    )
+    hierarchical.HierarchicalNLLLossMBM(hierarchy, classes, weights)
 
 
 @hypothesis.given(
