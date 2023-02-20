@@ -19,6 +19,7 @@ import math
 import os
 import pathlib
 
+import numpy as np
 import PIL
 import torch
 from tqdm.auto import tqdm
