@@ -1,0 +1,9 @@
+TRAIN:
+  WARMUP_EPOCHS: {choices: [0, 1, 2, 3, 5]}
+  BASE_LR: {min: 1.0e-6, max: 1.0e-3, scaling: log}
+
+  EPOCHS: {choices: [10, 30, 90]}
+
+SWEEP:
+  VERSION: 1
+  GOAL: "Simple hyperparameter sweep for NABirds from ImageNet"

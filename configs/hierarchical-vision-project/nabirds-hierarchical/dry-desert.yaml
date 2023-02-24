@@ -1,0 +1,36 @@
+DATA:
+  DATASET: nabird
+  IMG_SIZE: 192
+  NUM_WORKERS: 32
+MODEL:
+  TYPE: swinv2
+  NAME: swinv2_base_window12
+  DROP_PATH_RATE: 0.2
+  SWINV2:
+    EMBED_DIM: 128
+    DEPTHS: [ 2, 2, 18, 2 ]
+    NUM_HEADS: [ 4, 8, 16, 32 ]
+    WINDOW_SIZE: 12
+TRAIN:
+  GLOBAL_BATCH_SIZE: 256
+
+  WEIGHT_DECAY: 0.1
+
+  EPOCHS: 30
+  WARMUP_EPOCHS: 2
+
+  WARMUP_LR_FRACTION_OF_BASE_LR: 1.0e-3
+  MIN_LR_FRACTION_OF_BASE_LR: 1.0e-2
+  
+  # If this is a bad run, just quit
+  EARLY_STOPPING:
+    PATIENCE: 10
+
+EXPERIMENT:
+  NAME: dry-desert-hyperparams
+
+HIERARCHY:
+  VARIANT: multitask
+  MULTITASK_COEFFS: [ 2, 1.41, 1 ]
+
+SAVE_FREQ: 10

@@ -1,0 +1,39 @@
+DATA:
+  DATASET: nabird
+  IMG_SIZE: 192
+  NUM_WORKERS: 32
+
+# Model config should be identical because we are using the same architecture.
+MODEL:
+  TYPE: swinv2
+  NAME: swinv2_base_window12
+  SWINV2:
+    EMBED_DIM: 128
+    DEPTHS: [ 2, 2, 18, 2 ]
+    NUM_HEADS: [ 4, 8, 16, 32 ]
+    WINDOW_SIZE: 12
+
+TRAIN:
+  # Mostly we care about using the largest possible batch size given our device
+  # constratings because we are fine-tuning, so we don't need the stability that 
+  # comes from large global batch sizes. Since we're doing linear probing, we can
+  # have a really big device batch size, so we use a large global batch size too.
+  GLOBAL_BATCH_SIZE: 1024
+  
+  # Just tune for 30 epochs because it's only linear probing
+  EPOCHS: 30
+  
+  EARLY_STOPPING:
+    PATIENCE: 3
+
+
+  # 1/1000 of the BASE_LR
+  WARMUP_LR_FRACTION_OF_BASE_LR: 1.0e-3
+  # Same as the BASE_LR (constant LR)
+  MIN_LR_FRACTION_OF_BASE_LR: 1.0
+
+EXPERIMENT:
+  NAME: fuzzy-fig-nabird-0.1
+  TAGS: [ 'pretrained.fuzzy-fig-192', 'data.nabird', 'data.0.1' ]
+
+SAVE_FREQ: 0

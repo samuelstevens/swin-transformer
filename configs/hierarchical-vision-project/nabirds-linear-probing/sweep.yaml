@@ -1,0 +1,11 @@
+MODEL:
+  DROP_PATH_RATE: {choices: [0.0, 0.2]}
+TRAIN:
+  WARMUP_EPOCHS: {choices: [0, 1, 2, 3, 4, 5]}
+  WEIGHT_DECAY: {choices: [0.0, 0.1]}
+
+  BASE_LR: {min: 3.0e-7, max: 1.0e-3, scaling: log}
+
+SWEEP:
+  GOAL: "Hyperparameter tuning for linear-probing NAbirds"
+  VERSION: 1

@@ -3,9 +3,10 @@ einops
 isort
 jupyterlab
 preface
-opencv-python
 matplotlib
 mypy
+numpy
+opencv-python
 ruff
 timm
 termcolor

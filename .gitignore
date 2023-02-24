@@ -143,4 +143,8 @@ artifacts/
 scripts/env.fish
 
 # submodules (never using those again)
-object-detection
+object-detection/
+pose-estimation/
+
+# Configs that are auto-generated
+configs/generated/

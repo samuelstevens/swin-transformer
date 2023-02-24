@@ -12,16 +12,24 @@ MODEL:
     NUM_HEADS: [ 4, 8, 16, 32 ]
     WINDOW_SIZE: 12
 TRAIN:
-  GLOBAL_BATCH_SIZE: 1024
+  GLOBAL_BATCH_SIZE: 256
 
-  EPOCHS: 50
-  WARMUP_EPOCHS: 2
   WEIGHT_DECAY: 0.1
 
-  WARMUP_LR: 1e-7
-  BASE_LR: 1e-4
-  MIN_LR: 1e-4
+  EPOCHS: 30
+  WARMUP_EPOCHS: 2
+
+  WARMUP_LR_FRACTION_OF_BASE_LR: 1.0e-3
+  MIN_LR_FRACTION_OF_BASE_LR: 1.0e-2
+
+  # If this is a bad run, just quit
+  EARLY_STOPPING:
+    PATIENCE: 10
 
 EXPERIMENT:
-  NAME: red-chili-1e-4
-  WANDB_ID: 4mzf5xqt
+  NAME: weird-washer-hyperparams
+
+HIERARCHY:
+  VARIANT: ''
+
+SAVE_FREQ: 10

@@ -1,0 +1,5 @@
+This folder contains configs for Swin V2 models pretrained on ImageNet and then tuned on NABirds with and without hierarchy.
+I'm going to use 192x192 images to maintain a fair comparison with previous NABirds results.
+Unfortunately, there are only pretrained models with 8x8 windows and 16x16 windows, but we used a window of 12x12.
+I'm going to try the 16x16 pretrained models and use a 12x12 window--I can't remember if you can adjust window size of pretrained models or not.
+
