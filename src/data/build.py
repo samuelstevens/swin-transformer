@@ -8,18 +8,14 @@
 import os
 import random
 
-import numpy as np
 import torch
-import torch.distributed as dist
 from timm.data import Mixup, create_transform
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
 
-from .cached_image_folder import CachedImageFolder
 from .constants import data_mean_std
 from .hierarchical import HierarchicalImageFolder, HierarchicalMixup
 from .imagenet22k_dataset import IN22KDATASET
-from .samplers import SubsetRandomSampler
 
 try:
     from torchvision.transforms import InterpolationMode
@@ -42,19 +38,19 @@ except ImportError:
     from timm.data.transforms import _pil_interp
 
 
-def build_val_dataloader(config, is_ddp):
+def build_val_dataloader(config):
     config.defrost()
     dataset, config.MODEL.NUM_CLASSES = build_dataset(is_train=False, config=config)
     config.freeze()
 
     if config.TEST.SEQUENTIAL:
         sampler = torch.utils.data.SequentialSampler(dataset)
-    elif is_ddp:
+    elif config.DDP.ENABLED:
         sampler = torch.utils.data.distributed.DistributedSampler(
             dataset,
             shuffle=config.TEST.SHUFFLE,
-            num_replicas=dist.get_world_size(),
-            rank=dist.get_rank(),
+            num_replicas=config.DDP.WORLD_SIZE,
+            rank=config.DDP.LOCAL_RANK,
         )
     else:
         sampler = torch.utils.data.RandomSampler(dataset, replacement=False)
@@ -72,7 +68,7 @@ def build_val_dataloader(config, is_ddp):
     return dataset, dataloader
 
 
-def build_train_dataloader(config, is_ddp):
+def build_train_dataloader(config):
     config.defrost()
     dataset, config.MODEL.NUM_CLASSES = build_dataset(is_train=True, config=config)
     config.freeze()
@@ -83,17 +79,11 @@ def build_train_dataloader(config, is_ddp):
         indices = random.sample(range(len(dataset)), n_examples)
         dataset = Subset(dataset, indices)
 
-    # Check if training is for low data regime; select subset of data (script added)
-    if config.TRAIN.DATA_PERCENTAGE < 1:
-        n_examples = int(config.TRAIN.DATA_PERCENTAGE * len(dataset))
-        indices = random.sample(range(len(dataset)), n_examples)
-        dataset = Subset(dataset, indices)
-
-    if is_ddp:
+    if config.DDP.ENABLED:
         sampler_train = torch.utils.data.DistributedSampler(
             dataset,
-            num_replicas=dist.get_world_size(),
-            rank=dist.get_rank(),
+            num_replicas=config.DDP.WORLD_SIZE,
+            rank=config.DDP.LOCAL_RANK,
             shuffle=True,
         )
     else:
@@ -129,7 +119,7 @@ def build_aug_fn(config):
             label_smoothing=config.MODEL.LABEL_SMOOTHING,
             num_classes=config.MODEL.NUM_CLASSES,
         )
-        if config.HIERARCHICAL:
+        if config.HIERARCHY.VARIANT == "multitask":
             mixup_fn = HierarchicalMixup(**mixup_args)
         else:
             mixup_fn = Mixup(**mixup_args)
@@ -141,19 +131,8 @@ def build_dataset(is_train, config):
     transform = build_transform(is_train, config)
     if config.DATA.DATASET == "imagenet":
         prefix = "train" if is_train else "val"
-        if config.DATA.ZIP_MODE:
-            ann_file = prefix + "_map.txt"
-            prefix = prefix + ".zip@/"
-            dataset = CachedImageFolder(
-                config.DATA.DATA_PATH,
-                ann_file,
-                prefix,
-                transform,
-                cache_mode=config.DATA.CACHE_MODE if is_train else "part",
-            )
-        else:
-            root = os.path.join(config.DATA.DATA_PATH, prefix)
-            dataset = datasets.ImageFolder(root, transform=transform)
+        root = os.path.join(config.DATA.DATA_PATH, prefix)
+        dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
     elif config.DATA.DATASET == "imagenet22K":
         prefix = "ILSVRC2011fall_whole"
@@ -165,23 +144,16 @@ def build_dataset(is_train, config):
         nb_classes = 21841
 
     elif config.DATA.DATASET in ("inat21", "inat19"):
-        if config.DATA.ZIP_MODE:
-            raise NotImplementedError(
-                f"We do not support zipped {config.DATA.DATASET}."
-            )
-
         prefix = "train" if is_train else "val"
         root = os.path.join(config.DATA.DATA_PATH, prefix)
-        if config.HIERARCHICAL:
+        if config.HIERARCHY.VARIANT == "multitask":
             dataset = HierarchicalImageFolder(root, transform=transform)
             nb_classes = dataset.num_classes
         else:
             dataset = datasets.ImageFolder(root, transform=transform)
             nb_classes = len(dataset.classes)
     elif config.DATA.DATASET == "tiger-beetle":
-        if config.DATA.ZIP_MODE:
-            raise NotImplementedError("We do not support zipped tiger-beetle")
-        if config.HIERARCHICAL:
+        if config.HIERARCHY.VARIANT == "multitask":
             raise NotImplementedError("We do not support hierarchical tiger-beetle")
 
         prefix = "train" if is_train else "val"
@@ -189,28 +161,24 @@ def build_dataset(is_train, config):
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 9
     elif config.DATA.DATASET == "nabird":
-        if config.DATA.ZIP_MODE:
-            raise NotImplementedError("We do not support zipped nabird")
-        if config.HIERARCHICAL:
-            raise NotImplementedError("We do not support hierarchical nabird")
-
         prefix = "train" if is_train else "val"
         root = os.path.join(config.DATA.DATA_PATH, prefix)
-        dataset = datasets.ImageFolder(root, transform=transform)
-        nb_classes = 555
+        if config.HIERARCHY.VARIANT == "multitask":
+            dataset = HierarchicalImageFolder(root, transform=transform)
+            nb_classes = dataset.num_classes
+        else:
+            dataset = datasets.ImageFolder(root, transform=transform)
+            nb_classes = 555
     elif config.DATA.DATASET == "ip102":
-        if config.DATA.ZIP_MODE:
-            raise NotImplementedError("We do not support zipped nabird")
-        if config.HIERARCHICAL:
-            raise NotImplementedError("We do not support hierarchical nabird")
-
         prefix = "train" if is_train else "val"
         root = os.path.join(config.DATA.DATA_PATH, prefix)
+
+        if config.HIERARCHY.VARIANT == "multitask":
+            raise NotImplementedError("We do not support hierarchical nabird")
+
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 102
     elif config.DATA.DATASET == "stanford_dogs":
-        if config.DATA.ZIP_MODE:
-            raise NotImplementedError("We do not support zipped nabird")
         if config.HIERARCHICAL:
             raise NotImplementedError("We do not support hierarchical nabird")
 

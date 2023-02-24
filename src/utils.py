@@ -11,15 +11,13 @@ import pickle
 import random
 from copy import deepcopy
 from math import exp, fsum
-from typing import Any, Dict, Iterator, List, Mapping, Tuple
+from typing import Any, Iterator, List
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from nltk.tree import Tree
 from torch._six import inf
-
-from . import config
 
 
 @dataclasses.dataclass(frozen=True)
@@ -113,11 +111,11 @@ def handle_linear_head(config, model, state_dict, logger, *, strict=False) -> se
     If strict is True, then raise an error if we re-initialize ANY weights.
     """
 
-    pretrained_hierarchical = _hierarchical_bias_k(0) in state_dict
-    current_hierarchical = config.HIERARCHICAL
+    pretrained_hierarchical_multitask = _hierarchical_bias_k(0) in state_dict
+    current_hierarchical_multitask = config.HIERARCHY.VARIANT == "multitask"
     okay_missing_keys = set()
 
-    if not pretrained_hierarchical and not current_hierarchical:
+    if not pretrained_hierarchical_multitask and not current_hierarchical_multitask:
         # TESTED because Microsoft wrote this code.
         # Both have a single linear head
         assert "head.bias" in state_dict, "Should have a single pre-trained linear head"
@@ -148,7 +146,7 @@ def handle_linear_head(config, model, state_dict, logger, *, strict=False) -> se
                 "Error in loading classifier head, randomly re-init classifier head."
             )
             okay_missing_keys.update(["head.bias", "head.weight"])
-    elif pretrained_hierarchical and not current_hierarchical:
+    elif pretrained_hierarchical_multitask and not current_hierarchical_multitask:
         assert (
             "head.bias" not in state_dict
         ), "Should not have a single pre-trained linear head"
@@ -192,7 +190,7 @@ def handle_linear_head(config, model, state_dict, logger, *, strict=False) -> se
             del state_dict[_hierarchical_weight_k(i)]
             del state_dict[_hierarchical_bias_k(i)]
 
-    elif not pretrained_hierarchical and current_hierarchical:
+    elif not pretrained_hierarchical_multitask and current_hierarchical_multitask:
         # UNTESTED
         assert "head.bias" in state_dict, "Should have a single pre-trained linear head"
         assert not hasattr(
@@ -207,7 +205,10 @@ def handle_linear_head(config, model, state_dict, logger, *, strict=False) -> se
         del state_dict["head.weight"]
         del state_dict["head.bias"]
 
-    elif pretrained_hierarchical and current_hierarchical:
+        # Okay to re-init the hierarchical head keys
+        okay_missing_keys.update([key for key in model.state_dict() if "heads" in key])
+
+    elif pretrained_hierarchical_multitask and current_hierarchical_multitask:
         assert (
             "head.bias" not in state_dict
         ), "Should not have a single pre-trained linear head"
@@ -299,11 +300,15 @@ def load_pretrained(config, model, logger):
 
     msg = model.load_state_dict(state_dict, strict=False)
     for key in msg.missing_keys:
+        # we register logit_clamp_max as a buffer, so if you initialize from
+        # Microsoft's checkpoints, it will be missing. It's a constant though,
+        # so it's completely fine to re-init.
         assert (
             key in okay_missing_head_keys
             or key in relative_coords_table_keys
             or key in relative_position_index_keys
             or key in attn_mask_keys
+            or "logit_clamp_max" in key
         ), f"Should only reinitialize relative positional information, not '{key}'"
     logger.warning(msg)
 
@@ -694,3 +699,101 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+
+class EarlyStopper:
+    def __init__(self, *, metric, patience, min_delta, goal):
+        """
+        Arguments:
+            metric (str): goal metric to optimize.
+            patience (int): number of epochs to wait before stopping if the metric is
+                            getting worse.
+            goal (str): either 'min' or 'max'; whether to minimize or maximize metric.
+            min_delta (float): incoming metrics need to be min_delta worse than the
+                               previous best for us to count it as getting worse.
+        """
+        self.metric = metric
+        self.patience = patience
+        self.min_delta = min_delta
+
+        self.goal = goal
+
+        # self.best is the best value seen so far.
+        if self.goal == "min":
+            self.best = np.inf
+        elif self.goal == "max":
+            self.best = -np.inf
+        else:
+            # After this we can assume self.goal is always min or max.
+            raise ValueError(f"goal must be either 'min' or 'max', not '{goal}'")
+
+        self.counter = 0
+
+    def early_stop(self, metrics):
+        if self.metric not in metrics:
+            raise ValueError(
+                f"Can't stop early on {', '.join(metrics.key())}; need {self.metric}"
+            )
+
+        incoming = metrics[self.metric]
+
+        if self.goal == "min":
+            if incoming < self.best:
+                self.best = incoming
+                self.counter = 0
+            elif incoming > self.best + self.min_delta:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    return True
+            return False
+        else:  # trying to maximize self.best
+            if incoming > self.best:
+                self.best = incoming
+                self.counter = 0
+            elif incoming < self.best + self.min_delta:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    return True
+            return False
+
+
+def scale_lr(config):
+    """
+    Scale the warmup and min learning rate.
+    """
+    if config.TRAIN.WARMUP_LR_FRACTION_OF_BASE_LR > 0:
+        config.TRAIN.WARMUP_LR = (
+            config.TRAIN.WARMUP_LR_FRACTION_OF_BASE_LR * config.TRAIN.BASE_LR
+        )
+    if config.TRAIN.MIN_LR_FRACTION_OF_BASE_LR > 0:
+        config.TRAIN.MIN_LR = (
+            config.TRAIN.MIN_LR_FRACTION_OF_BASE_LR * config.TRAIN.BASE_LR
+        )
+
+
+def fix_batch_size(config):
+    def divide_cleanly(a, b):
+        assert a % b == 0, f"{a} / {b} has remainder {a % b}"
+        return a // b
+
+    desired_device_batch_size = divide_cleanly(
+        config.TRAIN.GLOBAL_BATCH_SIZE, config.DDP.N_PROCS
+    )
+    actual_device_batch_size = config.TRAIN.DEVICE_BATCH_SIZE
+
+    if actual_device_batch_size > desired_device_batch_size:
+        print(
+            f"Decreasing device batch size from {actual_device_batch_size} to {desired_device_batch_size} so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {desired_device_batch_size * config.DDP.N_PROCS}!"
+        )
+        config.TRAIN.ACCUMULATION_STEPS = 1
+        config.TRAIN.DEVICE_BATCH_SIZE = desired_device_batch_size
+    elif desired_device_batch_size == actual_device_batch_size:
+        config.TRAIN.ACCUMULATION_STEPS = 1
+    else:
+        assert desired_device_batch_size > actual_device_batch_size
+        config.TRAIN.ACCUMULATION_STEPS = divide_cleanly(
+            desired_device_batch_size, actual_device_batch_size
+        )
+        print(
+            f"Using {config.TRAIN.ACCUMULATION_STEPS} accumulation steps so your global batch size is {config.TRAIN.GLOBAL_BATCH_SIZE}, not {actual_device_batch_size * config.DDP.N_PROCS}!"
+        )

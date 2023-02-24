@@ -5,7 +5,6 @@
 # Written by Ze Liu
 # --------------------------------------------------------
 
-import functools
 import logging
 import os
 import sys
@@ -61,6 +60,7 @@ class WandbWriter:
             config=config,
             project="hierarchical-vision",
             name=config.EXPERIMENT.NAME,
+            tags=config.EXPERIMENT.TAGS,
         )
 
         if not config.EXPERIMENT.WANDB_ID:
@@ -98,7 +98,7 @@ class WandbWriter:
     @property
     def name(self):
         if not self.enabled:
-            raise RuntimeError(f"Should not get .name on non-master process.")
+            raise RuntimeError("Should not get .name on non-master process.")
 
         return wandb.run.name
 

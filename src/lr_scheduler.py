@@ -16,8 +16,6 @@ from timm.scheduler.step_lr import StepLRScheduler
 def build_scheduler(config, optimizer, n_iter_per_epoch):
     num_steps = int(config.TRAIN.EPOCHS * n_iter_per_epoch)
     warmup_steps = int(config.TRAIN.WARMUP_EPOCHS * n_iter_per_epoch)
-    decay_steps = int(config.TRAIN.LR_SCHEDULER.DECAY_EPOCHS * n_iter_per_epoch)
-    multi_steps = [i * n_iter_per_epoch for i in config.TRAIN.LR_SCHEDULER.MULTISTEPS]
 
     lr_scheduler = None
     if config.TRAIN.LR_SCHEDULER.NAME == "cosine":
@@ -44,6 +42,7 @@ def build_scheduler(config, optimizer, n_iter_per_epoch):
             t_in_epochs=False,
         )
     elif config.TRAIN.LR_SCHEDULER.NAME == "step":
+        decay_steps = int(config.TRAIN.LR_SCHEDULER.DECAY_EPOCHS * n_iter_per_epoch)
         lr_scheduler = StepLRScheduler(
             optimizer,
             decay_t=decay_steps,
@@ -53,6 +52,9 @@ def build_scheduler(config, optimizer, n_iter_per_epoch):
             t_in_epochs=False,
         )
     elif config.TRAIN.LR_SCHEDULER.NAME == "multistep":
+        multi_steps = [
+            i * n_iter_per_epoch for i in config.TRAIN.LR_SCHEDULER.MULTISTEPS
+        ]
         lr_scheduler = MultiStepLRScheduler(
             optimizer,
             milestones=multi_steps,
