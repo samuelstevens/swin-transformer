@@ -1,8 +1,11 @@
 import collections
 import logging
 import pathlib
+import shutil
 import statistics
 import sys
+
+from .. import concurrency
 
 
 class ClassDistribution:
@@ -40,3 +43,32 @@ def create_logger(name, output_dir: pathlib.Path):
     logger.info("Made directory %s", output_dir)
 
     return logger
+
+
+def save_data(
+    image_paths: list[pathlib.Path], classes: list[str], output_dir: pathlib.Path
+) -> None:
+    """
+    Copies the images from image_paths into the output_dir.
+
+    Expecrts
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def output_path_of(i):
+        image_path = image_paths[i]
+        cls = classes[i]
+        *_, filename = image_path.parts
+        return output_dir / cls / filename
+
+    try:
+        pool = concurrency.BoundedExecutor()
+        for i, path in enumerate(image_paths):
+            pool.submit(output_path_of(i).parent.mkdir, parents=True, exist_ok=True)
+        pool.finish(desc="Making directories")
+
+        for i, path in enumerate(image_paths):
+            pool.submit(shutil.copy2, str(path), output_path_of(i))
+        pool.finish(desc="Copying data")
+    finally:
+        pool.shutdown()
