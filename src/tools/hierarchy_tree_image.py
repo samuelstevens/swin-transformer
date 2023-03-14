@@ -15,9 +15,6 @@ def create_hierarchical_tree_vis(features, hierarchy_labels, reduction_method="t
         if verbose:
             print(x)
 
-    features = features[:1000]
-    hierarchy_labels = hierarchy_labels[:1000]
-
     lvls = len(hierarchy_labels[0])
 
     log(f"Running {reduction_method} on features: {features.shape}. This may take some time.")
