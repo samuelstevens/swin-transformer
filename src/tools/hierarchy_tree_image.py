@@ -60,7 +60,7 @@ def create_hierarchical_tree_vis(features, hierarchy_labels, reduction_method="t
             idx = lbls[:, lvl] == lbl
             feat = reduced_feats[idx]
             if hierarchy_label_map is not None:
-                name = lvl_lbl_map[str(lbl)].split("_")[-1]
+                name = lvl_lbl_map[str(lbl)]
             else:
                 name = f"{lbl}"
             plt.scatter(feat[:, 0], feat[:, 1], label=name)
